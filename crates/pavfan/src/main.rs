@@ -1,30 +1,35 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! `pavfan`: CLI test unit for the HP Pavilion Gaming 15-dk1xxx fans.
+//! `pavfan`: command-line front-end.
 //!
-//! Runs in the foreground, as root, and hands the fans back to the BIOS when it
-//! exits (Ctrl-C, SIGTERM, SIGHUP, error, or panic). Use `--dry-run` to exercise
-//! everything against an in-memory EC without touching hardware.
+//! Two roles:
+//!  * client of the `pavfand` daemon (`status`, `set`): talks D-Bus, no root needed;
+//!  * stand-alone test unit (`run`, `release`): drives the EC directly as root,
+//!    with the same control loop the daemon uses. `run` refuses while the daemon
+//!    is active, so there is only ever one fan owner.
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use pavfan_core::controller::{
-    FanController, Limits, emergency_release, nominal_rpm, read_status,
-};
+use pavfan_core::controller::{Limits, emergency_release, nominal_rpm, read_status};
 use pavfan_core::curve::{default_auto, parse_curve};
 use pavfan_core::ec::{
     DebugfsEc, EC_IO_PATH, EcIo, MemEc, ec_sys_loaded, ec_sys_write_enabled, ensure_ec_sys_loaded,
     ensure_ec_sys_writable,
 };
-use pavfan_core::governor::{Decision, Governor, Inputs, Mode, Params};
+use pavfan_core::governor::{Decision, Mode, Params};
 use pavfan_core::machine::{self, Compat, DMI_DIR};
+use pavfan_core::runtime::{Health, RECOVERY_TICKS, Runtime};
 use pavfan_core::sensors::{CpuTemp, GpuTemp};
 use pavfan_core::{Error, Result};
+use pavfan_ipc::{BUS_NAME, Daemon1ProxyBlocking, Status};
+use zbus::blocking::Connection;
+use zbus::names::BusName;
 
 #[derive(Parser)]
 #[command(name = "pavfan", version, about = "Fan control for the HP Pavilion Gaming 15-dk1xxx")]
@@ -44,13 +49,25 @@ struct Common {
     /// Do not (re)load ec_sys automatically.
     #[arg(long)]
     no_module_setup: bool,
+    /// Talk to a daemon on the session bus instead of the system bus (development).
+    #[arg(long)]
+    session_bus: bool,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Show machine compatibility, EC state and temperatures.
+    /// Show daemon status (if running), machine compatibility, EC state and temperatures.
     Status(Common),
-    /// Control the fans in the foreground until Ctrl-C.
+    /// Ask the running daemon to change mode: off | auto | fixed [PERCENT] | manual.
+    Set {
+        #[arg(value_enum)]
+        mode: ModeArg,
+        /// FIXED: percent of the fan range (0-100). Keeps the previous value if omitted.
+        percent: Option<u8>,
+        #[command(flatten)]
+        common: Common,
+    },
+    /// Stand-alone test unit: control the fans in the foreground until Ctrl-C (root).
     Run(RunArgs),
     /// Rescue: hand the fans back to the BIOS (clears a stuck override).
     Release(Common),
@@ -67,6 +84,17 @@ enum ModeArg {
     Auto,
     Fixed,
     Manual,
+}
+
+impl ModeArg {
+    fn name(self) -> &'static str {
+        match self {
+            ModeArg::Off => "off",
+            ModeArg::Auto => "auto",
+            ModeArg::Fixed => "fixed",
+            ModeArg::Manual => "manual",
+        }
+    }
 }
 
 #[derive(Args)]
@@ -105,7 +133,7 @@ struct RunArgs {
     /// in every mode but OFF (at most 90).
     #[arg(long, default_value_t = 88.0)]
     hard_c: f32,
-    /// Take over even if the fans look externally controlled (e.g. NBFC).
+    /// Take over even if the fans look externally controlled (NBFC, or a running pavfand).
     #[arg(long)]
     force: bool,
     /// Print only state changes and errors.
@@ -117,6 +145,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.cmd {
         Cmd::Status(c) => status(&c),
+        Cmd::Set { mode, percent, common } => set(&common, mode, percent),
         Cmd::Run(a) => run(&a),
         Cmd::Release(c) => release(&c),
         Cmd::Curve { file } => curve(file.as_deref()),
@@ -147,11 +176,7 @@ fn check_machine(c: &Common) -> Result<()> {
 }
 
 fn require_root() -> Result<()> {
-    if is_root() {
-        Ok(())
-    } else {
-        Err(Error::EcAccess("EC access needs root (try sudo), or use --dry-run".into()))
-    }
+    if is_root() { Ok(()) } else { Err(Error::EcAccess("EC access needs root (try sudo), or use --dry-run".into())) }
 }
 
 fn open_rw(c: &Common) -> Result<DebugfsEc> {
@@ -162,23 +187,83 @@ fn open_rw(c: &Common) -> Result<DebugfsEc> {
     DebugfsEc::open()
 }
 
+// ------------------------------------------------------------- daemon client --
+
+fn bus_label(c: &Common) -> &'static str {
+    if c.session_bus { "session" } else { "system" }
+}
+
+fn bus(c: &Common) -> Result<Connection> {
+    let conn = if c.session_bus { Connection::session() } else { Connection::system() };
+    conn.map_err(|e| Error::Ipc(format!("connecting to the {} bus: {e}", bus_label(c))))
+}
+
+fn daemon_running(c: &Common) -> bool {
+    let Ok(conn) = bus(c) else { return false };
+    let Ok(dbus) = zbus::blocking::fdo::DBusProxy::new(&conn) else { return false };
+    let Ok(name) = BusName::try_from(BUS_NAME) else { return false };
+    dbus.name_has_owner(name).unwrap_or(false)
+}
+
+fn daemon_proxy(c: &Common) -> Result<Daemon1ProxyBlocking<'static>> {
+    let conn = bus(c)?;
+    Daemon1ProxyBlocking::new(&conn).map_err(|e| Error::Ipc(e.to_string()))
+}
+
+fn print_daemon_status(s: &Status) {
+    let fixed = if s.mode == "fixed" { format!(" ({}%)", s.fixed_percent) } else { String::new() };
+    println!(
+        "pavfand {}: mode {}{fixed}{}",
+        s.version,
+        s.mode,
+        if s.has_manual_curve { "" } else { " [no manual curve configured]" }
+    );
+    if s.engaged {
+        println!(
+            "  fans: level {} ({}%, {} RPM nominal), pavfan controlling{}",
+            s.level,
+            s.percent,
+            nominal_rpm(s.level),
+            if s.hard_override { " [HARD THERMAL OVERRIDE]" } else { "" }
+        );
+    } else {
+        println!("  fans: BIOS control (EC level {})", s.level);
+    }
+    let gpu = if !s.gpu_present {
+        "no GPU sensor".to_owned()
+    } else if s.gpu_c < 0.0 {
+        "GPU asleep".to_owned()
+    } else {
+        format!("GPU {:.0} C", s.gpu_c)
+    };
+    if s.cpu_c >= 0.0 {
+        println!("  temps: CPU {:.0} C, {gpu}, effective {:.0} C", s.cpu_c, s.effective_c);
+    }
+    if s.health != "ok" {
+        println!("  health: {} ({})", s.health, s.detail);
+    } else if !s.detail.is_empty() {
+        println!("  note: {}", s.detail);
+    }
+}
+
 // ---------------------------------------------------------------- status --
 
 fn status(c: &Common) -> Result<()> {
     check_machine(c)?;
+    match daemon_proxy(c).and_then(|p| p.get_status().map_err(|e| Error::Ipc(e.to_string()))) {
+        Ok(s) => print_daemon_status(&s),
+        Err(_) => println!("pavfand: not running (or not reachable on the {} bus)", bus_label(c)),
+    }
+
     if !c.dry_run && !c.no_module_setup && is_root() {
         // Read-only module is enough to look; never enables write support here.
         if let Err(e) = ensure_ec_sys_loaded() {
             eprintln!("pavfan: note: could not load ec_sys: {e}");
         }
     } else if !c.dry_run && !is_root() {
-        println!("note: not running as root; run with sudo to read the EC");
+        println!("note: not running as root; run with sudo to read the EC directly");
     }
-    println!(
-        "ec_sys: loaded={} write_support={}",
-        ec_sys_loaded(),
-        ec_sys_write_enabled()
-    );
+    println!("ec_sys: loaded={} write_support={}", ec_sys_loaded(), ec_sys_write_enabled());
     let ec_state = if c.dry_run {
         read_status(&mut MemEc::bios_idle())
     } else {
@@ -213,6 +298,27 @@ fn status(c: &Common) -> Result<()> {
     Ok(())
 }
 
+// ------------------------------------------------------------------- set --
+
+fn set(c: &Common, mode: ModeArg, percent: Option<u8>) -> Result<()> {
+    if let Some(p) = percent
+        && (p > 100 || mode != ModeArg::Fixed)
+    {
+        return Err(Error::Config("a percent (0-100) only makes sense with `set fixed`".into()));
+    }
+    let proxy = daemon_proxy(c)?;
+    let ipc = |e: zbus::Error| Error::Ipc(e.to_string());
+    if let Some(p) = percent {
+        proxy.set_fixed_percent(p).map_err(ipc)?;
+    }
+    proxy.set_mode(mode.name()).map_err(ipc)?;
+    // Give the control loop one tick to apply it, then show the result.
+    thread::sleep(Duration::from_millis(1300));
+    let s = proxy.get_status().map_err(ipc)?;
+    print_daemon_status(&s);
+    Ok(())
+}
+
 // --------------------------------------------------------------- release --
 
 fn release(c: &Common) -> Result<()> {
@@ -240,8 +346,7 @@ fn curve(file: Option<&Path>) -> Result<()> {
     let limits = Limits { min: 22, max: 42 };
     let c = match file {
         Some(p) => {
-            let text = std::fs::read_to_string(p)
-                .map_err(|e| Error::io(format!("reading {}", p.display()), e))?;
+            let text = std::fs::read_to_string(p).map_err(|e| Error::io(format!("reading {}", p.display()), e))?;
             println!("{}: valid", p.display());
             parse_curve(&text, limits)?
         }
@@ -270,6 +375,15 @@ fn run(a: &RunArgs) -> Result<()> {
         println!("mode OFF: handing control to the BIOS");
         return release(&a.common);
     }
+    if !a.common.dry_run && daemon_running(&a.common) {
+        if a.force {
+            eprintln!("pavfan: WARNING: pavfand is running; --force given, the two will fight over the EC");
+        } else {
+            return Err(Error::ForeignControl(
+                "pavfand is running; use `pavfan set ...`, or `systemctl stop pavfand` first (--force overrides)".into(),
+            ));
+        }
+    }
 
     if a.common.dry_run {
         println!("DRY RUN: in-memory EC, hardware untouched");
@@ -289,35 +403,14 @@ fn build_mode(a: &RunArgs, limits: Limits) -> Result<Mode> {
             _ => return Err(Error::Config("--mode fixed needs exactly one of --level / --percent".into())),
         },
         ModeArg::Manual => {
-            let p = a
-                .curve
-                .as_deref()
-                .ok_or_else(|| Error::Config("--mode manual needs --curve FILE".into()))?;
-            let text = std::fs::read_to_string(p)
-                .map_err(|e| Error::io(format!("reading {}", p.display()), e))?;
+            let p = a.curve.as_deref().ok_or_else(|| Error::Config("--mode manual needs --curve FILE".into()))?;
+            let text = std::fs::read_to_string(p).map_err(|e| Error::io(format!("reading {}", p.display()), e))?;
             Mode::Manual(parse_curve(&text, limits)?)
         }
     })
 }
 
-fn mode_name(m: &Mode) -> &'static str {
-    match m {
-        Mode::Off => "off",
-        Mode::Auto => "auto",
-        Mode::Fixed(_) => "fixed",
-        Mode::Manual(_) => "manual",
-    }
-}
-
-/// Consecutive good readings required before taking control again after a sensor failure.
-const RECOVERY_TICKS: u32 = 3;
-/// GPU read failures tolerated (reusing the last value) before falling back to the BIOS.
-const GPU_FAIL_TOLERANCE: u32 = 3;
-
 fn control_loop<E: EcIo>(ec: E, a: &RunArgs) -> Result<()> {
-    let mut controller = FanController::new(ec, a.force)?;
-    let limits = controller.limits();
-    let mode = build_mode(a, limits)?;
     let params = Params {
         gpu_bias_c: a.gpu_bias_c,
         engage_c: a.engage_c,
@@ -325,23 +418,23 @@ fn control_loop<E: EcIo>(ec: E, a: &RunArgs) -> Result<()> {
         hard_c: a.hard_c,
         ..Params::default()
     };
-    let mut governor = Governor::new(mode, params, limits)?;
-
-    let cpu = CpuTemp::discover()?;
-    let gpu = GpuTemp::discover()?;
-    if gpu.is_none() {
+    // FIXED/MANUAL need the EC limits, which the runtime learns on construction: start in
+    // AUTO (writes nothing) and switch before the first tick.
+    let mut rt = Runtime::new(ec, a.force, Mode::Auto, params)?;
+    let limits = rt.limits();
+    rt.set_mode(build_mode(a, limits)?)?;
+    if !rt.has_gpu_sensor() {
         eprintln!("pavfan: note: no NVIDIA GPU sensor available; deciding on CPU temperature only");
     }
 
     let stop = Arc::new(AtomicBool::new(false));
     for sig in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP] {
-        signal_hook::flag::register(sig, Arc::clone(&stop))
-            .map_err(|e| Error::io("installing signal handler", e))?;
+        signal_hook::flag::register(sig, Arc::clone(&stop)).map_err(|e| Error::io("installing signal handler", e))?;
     }
 
     println!(
         "mode {} | EC limits {}..{} | tick {} ms | Ctrl-C hands the fans back to the BIOS",
-        mode_name(governor.mode()),
+        rt.mode().name(),
         limits.min,
         limits.max,
         a.interval_ms
@@ -354,11 +447,6 @@ fn control_loop<E: EcIo>(ec: E, a: &RunArgs) -> Result<()> {
     let start = Instant::now();
     let deadline = a.duration.map(|d| start + Duration::from_secs(d));
     let interval = Duration::from_millis(a.interval_ms);
-
-    let mut last_gpu: Option<f32> = None;
-    let mut gpu_failures = 0u32;
-    let mut good_streak = 0u32;
-    let mut recovering = false;
     let mut last_key: Option<String> = None;
 
     let outcome = loop {
@@ -366,105 +454,53 @@ fn control_loop<E: EcIo>(ec: E, a: &RunArgs) -> Result<()> {
             break Ok(());
         }
         let tick_start = Instant::now();
-
-        // ---- sensors (any failure => BIOS control)
-        let cpu_r = cpu.read_c();
-        let gpu_r = match &gpu {
-            Some(g) => g.read_c(),
-            None => Ok(None),
-        };
-        let mut note = String::new();
-        let inputs = match (cpu_r, gpu_r) {
-            (Ok(c), Ok(g)) => {
-                gpu_failures = 0;
-                last_gpu = g;
-                Some(Inputs { cpu_c: c, gpu_c: g })
-            }
-            (Ok(c), Err(e)) => {
-                gpu_failures += 1;
-                if gpu_failures < GPU_FAIL_TOLERANCE {
-                    note = format!(" [GPU read failed ({e}); reusing last value]");
-                    Some(Inputs { cpu_c: c, gpu_c: last_gpu })
-                } else {
-                    note = format!(" [GPU sensor failing: {e}]");
-                    None
-                }
-            }
-            (Err(e), _) => {
-                note = format!(" [CPU sensor failed: {e}]");
-                None
-            }
+        let r = match rt.tick() {
+            Ok(r) => r,
+            Err(e) => break Err(e),
         };
 
-        // ---- decision
-        let (decision, summary) = match inputs {
-            None => {
-                good_streak = 0;
-                recovering = true;
-                governor.reset();
-                (Decision::Bios, "sensor failure -> BIOS".to_owned())
-            }
-            Some(i) => {
-                good_streak += 1;
-                if recovering && good_streak < RECOVERY_TICKS {
-                    (Decision::Bios, format!("sensors recovering ({good_streak}/{RECOVERY_TICKS})"))
-                } else {
-                    recovering = false;
-                    let eff = governor.effective_c(i);
-                    let d = governor.decide(i);
-                    (
-                        d,
-                        format!(
-                            "cpu {:.0}C gpu {} eff {:.0}C",
-                            i.cpu_c,
-                            i.gpu_c.map_or_else(|| "--".to_owned(), |g| format!("{g:.0}C")),
-                            eff
-                        ),
-                    )
-                }
-            }
+        let summary = match (&r.health, r.cpu_c) {
+            (Health::SensorFailure(m), _) => format!("sensor failure -> BIOS ({m})"),
+            (Health::Recovering(n), _) => format!("sensors recovering ({n}/{RECOVERY_TICKS})"),
+            (Health::Ok, Some(cpu)) => format!(
+                "cpu {cpu:.0}C gpu {} eff {:.0}C",
+                r.gpu_c.map_or_else(|| "--".to_owned(), |g| format!("{g:.0}C")),
+                r.effective_c.unwrap_or(cpu)
+            ),
+            (Health::Ok, None) => "no readings".to_owned(),
         };
-
-        // ---- act
-        let action = match decision {
-            Decision::Bios => match controller.release() {
-                Ok(()) => format!("BIOS (level {})", controller.bios_level().unwrap_or(0)),
-                Err(e) => break Err(e),
-            },
-            Decision::Level(l) => match controller.set_level(l) {
-                Ok(ap) => format!(
-                    "level {} ({}%, {} RPM nominal){}",
-                    ap.level,
-                    limits.to_percent(ap.level),
-                    nominal_rpm(ap.level),
-                    if ap.reasserted { " [EC had reset: re-applied]" } else { "" }
-                ),
-                Err(e) => break Err(e),
-            },
+        let action = match r.decision {
+            Decision::Bios => format!("BIOS (level {})", r.level),
+            Decision::Level(_) => format!(
+                "level {} ({}%, {} RPM nominal){}{}",
+                r.level,
+                limits.to_percent(r.level),
+                nominal_rpm(r.level),
+                if r.hard_override { " [HARD OVERRIDE]" } else { "" },
+                if r.reasserted { " [EC had reset: re-applied]" } else { "" }
+            ),
         };
-
         // "level 38" / "BIOS": the part of the action that identifies a state change.
         let key = action.split(" (").next().unwrap_or_default().to_owned();
         let changed = last_key.as_deref() != Some(key.as_str());
+        let note = r.note.as_deref().map(|n| format!(" [{n}]")).unwrap_or_default();
         if !a.quiet || changed || !note.is_empty() {
             println!("[{:>5}s] {summary} | {action}{note}", start.elapsed().as_secs());
         }
         last_key = Some(key);
 
-        // ---- sleep (in small slices so signals are honoured promptly)
         while tick_start.elapsed() < interval && !stop.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(50));
         }
     };
 
-    // Explicit release so errors are visible (Drop would only log them).
-    let released = controller.release();
+    let released = rt.release();
     if stop.load(Ordering::Relaxed) {
         println!("signal received: releasing to the BIOS");
     }
-    match (&outcome, &released) {
-        (_, Ok(())) => println!("fans handed back to the BIOS"),
-        (_, Err(e)) => eprintln!("pavfan: CRITICAL: could not hand the fans back: {e}"),
+    match &released {
+        Ok(()) => println!("fans handed back to the BIOS"),
+        Err(e) => eprintln!("pavfan: CRITICAL: could not hand the fans back: {e}"),
     }
     outcome?;
     released

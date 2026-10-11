@@ -19,6 +19,8 @@ pub enum Error {
     Sensor(String),
     /// Bad user configuration (curve file, arguments).
     Config(String),
+    /// Talking to the daemon (D-Bus) failed.
+    Ipc(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -39,6 +41,7 @@ impl fmt::Display for Error {
             Error::ForeignControl(m) => write!(f, "fans already under external control: {m}"),
             Error::Sensor(m) => write!(f, "sensor: {m}"),
             Error::Config(m) => write!(f, "configuration: {m}"),
+            Error::Ipc(m) => write!(f, "daemon: {m}"),
         }
     }
 }

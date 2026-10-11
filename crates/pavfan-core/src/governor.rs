@@ -17,6 +17,17 @@ pub enum Mode {
     Manual(Curve),
 }
 
+impl Mode {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Mode::Off => "off",
+            Mode::Auto => "auto",
+            Mode::Fixed(_) => "fixed",
+            Mode::Manual(_) => "manual",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Inputs {
     pub cpu_c: f32,
@@ -120,6 +131,11 @@ impl Governor {
 
     pub fn mode(&self) -> &Mode {
         &self.mode
+    }
+
+    /// True while the hard thermal override is forcing maximum fans.
+    pub fn hard_active(&self) -> bool {
+        self.hard_active
     }
 
     /// Temperature the decisions are based on: the hotter of the CPU and the

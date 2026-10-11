@@ -16,6 +16,7 @@ pub mod ec;
 pub mod error;
 pub mod governor;
 pub mod machine;
+pub mod runtime;
 pub mod sensors;
 
 pub use error::{Error, Result};

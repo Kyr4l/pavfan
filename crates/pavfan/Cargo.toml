@@ -1,16 +1,118 @@
 [package]
 name = "pavfan"
-description = "pavfan CLI test unit: drives the fans of the HP Pavilion Gaming 15-dk1xxx"
+description = "Fan control for the HP Pavilion Gaming Laptop 15-dk1xxx (CLI; the package also ships pavfand and pavfan-tray)"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
 [dependencies]
 pavfan-core = { path = "../pavfan-core" }
+pavfan-ipc = { path = "../pavfan-ipc" }
 clap = { version = "4", features = ["derive"] }
 signal-hook = "0.3"
+zbus = { version = "5", default-features = false, features = ["tokio", "blocking-api"] }
 
 [lints]
 workspace = true
+
+# ---------------------------------------------------------------------------
+# Packaging. One package "pavfan" containing the CLI, the daemon and the tray.
+#   make rpm   -> cargo generate-rpm   (pure Rust, no rpmbuild needed)
+#   make deb   -> cargo deb            (pure Rust, no dpkg needed)
+# Both read the same file list below; `make install` mirrors it for manual installs.
+# ---------------------------------------------------------------------------
+
+[package.metadata.deb]
+name = "pavfan"
+maintainer = "Kyr4l <alanemmanuel5@gmail.com>"
+copyright = "2026 Kyr4l"
+license-file = ["../../LICENSE", "0"]
+section = "utils"
+priority = "optional"
+depends = "libc6 (>= 2.34), libgcc-s1, dbus, systemd"
+extended-description = """\
+Fan control for the HP Pavilion Gaming Laptop 15-dk1xxx (board 8742). The BIOS
+of this laptop ignores GPU heat and ramps its fans late; pavfand drives the
+embedded controller's fan setpoint from the hotter of CPU and GPU, with a hard
+thermal override, a systemd watchdog and clean hand-back to the BIOS.
+Refuses to run on any other machine. Written with AI assistance, tested on the
+real hardware; see /usr/share/doc/pavfan/README.md."""
+conf-files = ["/etc/pavfan/config.toml", "/etc/pavfan/curve.toml"]
+maintainer-scripts = "../../packaging/debian"
+assets = [
+    ["target/release/pavfan", "usr/bin/", "755"],
+    ["target/release/pavfand", "usr/bin/", "755"],
+    ["target/release/pavfan-tray", "usr/bin/", "755"],
+    ["../../packaging/systemd/pavfand.service", "usr/lib/systemd/system/", "644"],
+    ["../../packaging/dbus/org.pavfan.Daemon1.conf", "usr/share/dbus-1/system.d/", "644"],
+    ["../../packaging/modules-load.d/pavfan.conf", "usr/lib/modules-load.d/", "644"],
+    ["../../packaging/modprobe.d/pavfan-ec_sys.conf", "usr/lib/modprobe.d/", "644"],
+    ["../../packaging/config/config.toml", "etc/pavfan/", "644"],
+    ["../../packaging/config/curve.toml", "etc/pavfan/", "644"],
+    ["../../packaging/xdg/pavfan-tray.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/icons/pavfan.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["../../packaging/icons/pavfan-off.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
+    ["../../packaging/icons/pavfan-idle.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
+    ["../../packaging/icons/pavfan-active.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
+    ["../../packaging/icons/pavfan-hot.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
+    ["../../packaging/icons/pavfan-error.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
+    ["../../README.md", "usr/share/doc/pavfan/", "644"],
+    ["../../docs/*.md", "usr/share/doc/pavfan/docs/", "644"],
+]
+
+[package.metadata.generate-rpm]
+summary = "Fan control for the HP Pavilion Gaming Laptop 15-dk1xxx"
+license = "GPL-3.0-or-later"
+url = "https://github.com/Kyr4l/fancontrol-hp-15-dk1xxx"
+post_install_script = """
+groupadd -r pavfan >/dev/null 2>&1 || :
+systemctl daemon-reload >/dev/null 2>&1 || :
+systemctl reload dbus.service >/dev/null 2>&1 || :
+if [ -d /sys/module/ec_sys ] && [ "$(cat /sys/module/ec_sys/parameters/write_support 2>/dev/null)" != Y ]; then
+    modprobe -r ec_sys >/dev/null 2>&1 || :
+fi
+modprobe ec_sys write_support=1 >/dev/null 2>&1 || :
+if [ "$1" = 1 ]; then
+    systemctl enable --now pavfand.service >/dev/null 2>&1 || :
+else
+    systemctl try-restart pavfand.service >/dev/null 2>&1 || :
+fi
+gtk-update-icon-cache -q /usr/share/icons/hicolor >/dev/null 2>&1 || :
+"""
+pre_uninstall_script = """
+if [ "$1" = 0 ]; then
+    systemctl disable --now pavfand.service >/dev/null 2>&1 || :
+fi
+"""
+post_uninstall_script = """
+systemctl daemon-reload >/dev/null 2>&1 || :
+systemctl reload dbus.service >/dev/null 2>&1 || :
+gtk-update-icon-cache -q /usr/share/icons/hicolor >/dev/null 2>&1 || :
+"""
+assets = [
+    { source = "target/release/pavfan", dest = "/usr/bin/pavfan", mode = "755" },
+    { source = "target/release/pavfand", dest = "/usr/bin/pavfand", mode = "755" },
+    { source = "target/release/pavfan-tray", dest = "/usr/bin/pavfan-tray", mode = "755" },
+    { source = "packaging/systemd/pavfand.service", dest = "/usr/lib/systemd/system/pavfand.service", mode = "644" },
+    { source = "packaging/dbus/org.pavfan.Daemon1.conf", dest = "/usr/share/dbus-1/system.d/org.pavfan.Daemon1.conf", mode = "644" },
+    { source = "packaging/modules-load.d/pavfan.conf", dest = "/usr/lib/modules-load.d/pavfan.conf", mode = "644" },
+    { source = "packaging/modprobe.d/pavfan-ec_sys.conf", dest = "/usr/lib/modprobe.d/pavfan-ec_sys.conf", mode = "644" },
+    { source = "packaging/config/config.toml", dest = "/etc/pavfan/config.toml", mode = "644", config = "noreplace" },
+    { source = "packaging/config/curve.toml", dest = "/etc/pavfan/curve.toml", mode = "644", config = "noreplace" },
+    { source = "packaging/xdg/pavfan-tray.desktop", dest = "/usr/share/applications/pavfan-tray.desktop", mode = "644" },
+    { source = "packaging/icons/pavfan.svg", dest = "/usr/share/icons/hicolor/scalable/apps/pavfan.svg", mode = "644" },
+    { source = "packaging/icons/pavfan-off.svg", dest = "/usr/share/icons/hicolor/scalable/status/pavfan-off.svg", mode = "644" },
+    { source = "packaging/icons/pavfan-idle.svg", dest = "/usr/share/icons/hicolor/scalable/status/pavfan-idle.svg", mode = "644" },
+    { source = "packaging/icons/pavfan-active.svg", dest = "/usr/share/icons/hicolor/scalable/status/pavfan-active.svg", mode = "644" },
+    { source = "packaging/icons/pavfan-hot.svg", dest = "/usr/share/icons/hicolor/scalable/status/pavfan-hot.svg", mode = "644" },
+    { source = "packaging/icons/pavfan-error.svg", dest = "/usr/share/icons/hicolor/scalable/status/pavfan-error.svg", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/pavfan/LICENSE", mode = "644", doc = true },
+    { source = "README.md", dest = "/usr/share/doc/pavfan/README.md", mode = "644", doc = true },
+    { source = "docs/*.md", dest = "/usr/share/doc/pavfan/docs/", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+systemd = "*"
