@@ -184,7 +184,7 @@ impl ksni::Tray for PavfanTray {
             .into(),
             MenuItem::Separator,
             CheckmarkItem {
-                label: "Start at login (this user)".into(),
+                label: "Start at login".into(),
                 checked: autostart::is_enabled(),
                 activate: Box::new(|this: &mut Self| {
                     if let Err(e) = autostart::set_enabled(!autostart::is_enabled()) {

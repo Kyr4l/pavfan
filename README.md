@@ -1,6 +1,6 @@
 # pavfan
 
-> Repository: `fancontrol-hp-15-dk1xxx`
+> Repository: `Kyr4l/pavfan` (formerly `fancontrol-hp-15-dk1xxx`)
 
 Fan control for the **HP Pavilion Gaming Laptop 15-dk1xxx** (board `8742`) on Linux: a
 sandboxed systemd daemon, a CLI, and a system-tray icon.
@@ -100,7 +100,7 @@ GPU-heat fix that matters most on Linux cannot be reproduced there.
 | Mode | Behaviour |
 |---|---|
 | **OFF** | The BIOS controls the fans (stock behaviour). |
-| **AUTO** (default) | Built-in curve over `max(CPU, GPU + 8 °C)`: reacts to GPU heat, which the BIOS ignores on Linux (measured), and ramps immediately instead of lagging. Hands back to the BIOS below 62 °C. |
+| **AUTO** (default) | Built-in curve over `max(CPU, GPU + 8 °C)`: reacts to GPU heat, which the BIOS ignores on Linux (measured). Takes over once the effective temperature has stayed ≥ 68 °C for 5 s, holds for at least 30 s, and hands back to the BIOS after 10 s below 62 °C, so short load spikes do not cause fan bursts. |
 | **FIXED** | Both fans held at a fixed percentage of the EC range. |
 | **MANUAL** | Your own temperature → speed curve, always engaged. |
 

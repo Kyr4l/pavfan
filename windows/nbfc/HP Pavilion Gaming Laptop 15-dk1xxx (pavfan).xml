@@ -2,7 +2,7 @@
 <!--
   NoteBook FanControl (NBFC) profile for the HP Pavilion Gaming Laptop 15-dk1xxx
   (board 8742), derived from the pavfan project's measurements on BIOS F.50:
-  https://github.com/Kyr4l/fancontrol-hp-15-dk1xxx  (GPL-3.0-or-later)
+  https://github.com/Kyr4l/pavfan  (GPL-3.0-or-later)
 
   What differs from the generic "HP 15-BW00x" profile people use on this machine:
    * MinSpeedValue/MaxSpeedValue are the EC's own limits, 22..42 (units of 100 RPM),

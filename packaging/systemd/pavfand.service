@@ -1,6 +1,6 @@
 [Unit]
 Description=pavfan fan-control daemon (HP Pavilion Gaming 15-dk1xxx)
-Documentation=https://github.com/Kyr4l/fancontrol-hp-15-dk1xxx
+Documentation=https://github.com/Kyr4l/pavfan
 # ec_sys must be loaded with write_support=1 (packaging/modules-load.d + modprobe.d).
 After=systemd-modules-load.service dbus.service
 Wants=systemd-modules-load.service
