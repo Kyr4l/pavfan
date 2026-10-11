@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["crates/pavfan-core", "crates/pavfan"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Kyr4l/fancontrol-hp-15-dk1xxx"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# This code writes to hardware as root: no panics on the happy path.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.release]
+# Panics MUST unwind so Drop runs and hands the fans back to the BIOS.
+panic = "unwind"
+overflow-checks = true
