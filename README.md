@@ -151,12 +151,13 @@ The daemon runs as root and writes to the EC, so it is designed to fail towards 
 | EC fan registers identified | ✅ override target `0x14` + enable bit `0x0F`.3; see [docs/ec-register-map.md](docs/ec-register-map.md) |
 | Real fan RPM readout | ❌ no tachometer found; `0x11` only echoes the commanded level |
 | Write fan level (both fans, shared setpoint) | ✅ verified on hardware |
-| Independent CPU / GPU fan control | ❌ not available through the EC window; firmware leads documented and parked |
+| Independent CPU / GPU fan control | ❌ not available through the EC window (one setpoint; the GPU fan follows it strongly, the CPU fan only near 100 %); firmware leads documented and parked |
 | Return control to BIOS cleanly | ✅ verified (17 controlled runs, all restored) |
 | CLI `pavfan` | ✅ `status`, `run` (fixed/auto), `release` verified on hardware; AUTO measured against the BIOS |
-| Daemon `pavfand` | 🔧 built, unit-tested, end-to-end tested on the session bus with the in-memory EC; **first run as a real service pending** |
-| Tray `pavfan-tray` | 🔧 built; registers with Plasma's StatusNotifierWatcher in testing; **visual check pending** |
-| RPM / DEB packages | 🔧 built from the same manifest; **installation test pending** |
+| Daemon `pavfand` | ✅ running as the system service on the laptop (installed from the RPM); mode switching from CLI and tray verified |
+| Tray `pavfan-tray` | ✅ verified on KDE Plasma (Wayland): icon, menu, mode switching |
+| RPM package | ✅ installed and working on the laptop (openSUSE Slowroll) |
+| DEB package | 🔧 built from the same manifest; not yet installed on a Debian/Ubuntu system |
 
 Items move to ✅ only once verified on the real laptop.
 
