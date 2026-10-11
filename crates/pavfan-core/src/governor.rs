@@ -59,6 +59,19 @@ pub struct Params {
     pub hard_hysteresis_c: f32,
     /// Fan level may drop by one step only every N ticks (anti-hunting, less noise).
     pub down_every_ticks: u32,
+    /// AUTO: consecutive ticks at/above `engage_c` before taking over. Debounces short
+    /// load spikes, which otherwise cause a few-second fan burst and a hand-back.
+    pub engage_ticks: u32,
+    /// AUTO: consecutive ticks at/below `disengage_c` before handing back to the BIOS.
+    pub release_ticks: u32,
+    /// AUTO: once engaged, stay engaged for at least this many ticks.
+    pub min_engaged_ticks: u32,
+}
+
+/// Convert a duration in seconds to control-loop ticks (at least 1).
+pub fn secs_to_ticks(secs: f32, interval: std::time::Duration) -> u32 {
+    let ms = interval.as_millis().max(1) as f32;
+    ((secs * 1000.0) / ms).round().max(1.0) as u32
 }
 
 /// Highest value `hard_c` may be configured to.
@@ -73,6 +86,9 @@ impl Default for Params {
             hard_c: 88.0,
             hard_hysteresis_c: 5.0,
             down_every_ticks: 3,
+            engage_ticks: 5,
+            release_ticks: 10,
+            min_engaged_ticks: 30,
         }
     }
 }
@@ -94,6 +110,9 @@ impl Params {
         if !(-20.0..=20.0).contains(&self.gpu_bias_c) {
             return Err(Error::Config("GPU bias must be within -20..20 C".into()));
         }
+        if self.engage_ticks == 0 || self.release_ticks == 0 || self.min_engaged_ticks == 0 {
+            return Err(Error::Config("engage/release/min-engaged tick counts must be at least 1".into()));
+        }
         Ok(())
     }
 }
@@ -107,6 +126,9 @@ pub struct Governor {
     hard_active: bool,
     current: Option<u8>,
     down_ticks: u32,
+    above_ticks: u32,
+    below_ticks: u32,
+    engaged_ticks: u32,
 }
 
 impl Governor {
@@ -126,6 +148,9 @@ impl Governor {
             hard_active: false,
             current: None,
             down_ticks: 0,
+            above_ticks: 0,
+            below_ticks: 0,
+            engaged_ticks: 0,
         })
     }
 
@@ -153,6 +178,9 @@ impl Governor {
         self.hard_active = false;
         self.current = None;
         self.down_ticks = 0;
+        self.above_ticks = 0;
+        self.below_ticks = 0;
+        self.engaged_ticks = 0;
     }
 
     pub fn decide(&mut self, i: Inputs) -> Decision {
@@ -172,6 +200,13 @@ impl Governor {
         if self.hard_active {
             self.current = Some(self.limits.max);
             self.down_ticks = 0;
+            if !self.engaged {
+                // Count as engaged so the minimum hold applies once the emergency is over.
+                self.engaged = true;
+                self.engaged_ticks = 0;
+                self.above_ticks = 0;
+                self.below_ticks = 0;
+            }
             return Decision::Level(self.limits.max);
         }
 
@@ -184,11 +219,31 @@ impl Governor {
             Mode::Manual(curve) => curve.level_at(eff),
             Mode::Auto => {
                 if self.engaged {
+                    self.engaged_ticks = self.engaged_ticks.saturating_add(1);
                     if eff <= self.params.disengage_c {
-                        self.engaged = false;
+                        self.below_ticks += 1;
+                    } else {
+                        self.below_ticks = 0;
                     }
-                } else if eff >= self.params.engage_c {
-                    self.engaged = true;
+                    if self.below_ticks >= self.params.release_ticks
+                        && self.engaged_ticks >= self.params.min_engaged_ticks
+                    {
+                        self.engaged = false;
+                        self.below_ticks = 0;
+                        self.engaged_ticks = 0;
+                    }
+                } else {
+                    if eff >= self.params.engage_c {
+                        self.above_ticks += 1;
+                    } else {
+                        self.above_ticks = 0;
+                    }
+                    if self.above_ticks >= self.params.engage_ticks {
+                        self.engaged = true;
+                        self.above_ticks = 0;
+                        self.below_ticks = 0;
+                        self.engaged_ticks = 1;
+                    }
                 }
                 if !self.engaged {
                     self.current = None;
@@ -228,8 +283,65 @@ mod tests {
 
     const L: Limits = Limits { min: 22, max: 42 };
 
+    /// Immediate timing (no debounce) for the tests that are about thresholds and levels.
+    fn fast() -> Params {
+        Params { engage_ticks: 1, release_ticks: 1, min_engaged_ticks: 1, ..Params::default() }
+    }
+
     fn gov(mode: Mode) -> Governor {
-        Governor::new(mode, Params::default(), L).expect("valid governor")
+        Governor::new(mode, fast(), L).expect("valid governor")
+    }
+
+    #[test]
+    fn auto_debounces_short_heat_bursts() {
+        let mut g = Governor::new(Mode::Auto, Params::default(), L).unwrap(); // engage after 5 ticks
+        for _ in 0..4 {
+            assert_eq!(g.decide(cpu(72.0)), Decision::Bios);
+        }
+        assert_eq!(g.decide(cpu(50.0)), Decision::Bios); // burst over: counter resets
+        for _ in 0..4 {
+            assert_eq!(g.decide(cpu(72.0)), Decision::Bios);
+        }
+        assert!(matches!(g.decide(cpu(72.0)), Decision::Level(_))); // 5th consecutive hot tick
+    }
+
+    #[test]
+    fn auto_holds_for_the_minimum_time_then_releases_after_the_delay() {
+        let p = Params { engage_ticks: 1, release_ticks: 3, min_engaged_ticks: 6, ..Params::default() };
+        let mut g = Governor::new(Mode::Auto, p, L).unwrap();
+        assert!(matches!(g.decide(cpu(70.0)), Decision::Level(_))); // tick 1: engaged
+        for _ in 0..4 {
+            assert!(matches!(g.decide(cpu(50.0)), Decision::Level(_))); // ticks 2-5: cool, but held
+        }
+        assert_eq!(g.decide(cpu(50.0)), Decision::Bios); // tick 6: hold satisfied, 5 ticks below
+    }
+
+    #[test]
+    fn auto_release_delay_restarts_if_it_warms_up_again() {
+        let p = Params { engage_ticks: 1, release_ticks: 3, min_engaged_ticks: 1, ..Params::default() };
+        let mut g = Governor::new(Mode::Auto, p, L).unwrap();
+        assert!(matches!(g.decide(cpu(70.0)), Decision::Level(_)));
+        assert!(matches!(g.decide(cpu(50.0)), Decision::Level(_)));
+        assert!(matches!(g.decide(cpu(50.0)), Decision::Level(_)));
+        assert!(matches!(g.decide(cpu(66.0)), Decision::Level(_))); // above disengage: reset
+        assert!(matches!(g.decide(cpu(50.0)), Decision::Level(_)));
+        assert!(matches!(g.decide(cpu(50.0)), Decision::Level(_)));
+        assert_eq!(g.decide(cpu(50.0)), Decision::Bios);
+    }
+
+    #[test]
+    fn hard_override_is_immediate_even_with_debounce() {
+        let mut g = Governor::new(Mode::Auto, Params::default(), L).unwrap();
+        assert_eq!(g.decide(cpu(90.0)), Decision::Level(42));
+    }
+
+    #[test]
+    fn secs_to_ticks_rounds_and_floors_at_one() {
+        use std::time::Duration;
+        assert_eq!(secs_to_ticks(5.0, Duration::from_millis(1000)), 5);
+        assert_eq!(secs_to_ticks(5.0, Duration::from_millis(500)), 10);
+        assert_eq!(secs_to_ticks(0.0, Duration::from_millis(1000)), 1);
+        assert_eq!(secs_to_ticks(1.0, Duration::from_millis(250)), 4);
     }
 
     fn cpu(t: f32) -> Inputs {
@@ -340,6 +452,8 @@ mod tests {
         let p = Params { engage_c: 95.0, ..Params::default() };
         assert!(Governor::new(Mode::Auto, p, L).is_err());
         let p = Params { gpu_bias_c: 30.0, ..Params::default() };
+        assert!(Governor::new(Mode::Auto, p, L).is_err());
+        let p = Params { engage_ticks: 0, ..Params::default() };
         assert!(Governor::new(Mode::Auto, p, L).is_err());
     }
 

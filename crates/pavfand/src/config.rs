@@ -5,10 +5,11 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use pavfan_core::controller::Limits;
 use pavfan_core::curve::{Curve, Point, parse_curve};
-use pavfan_core::governor::Params;
+use pavfan_core::governor::{Params, secs_to_ticks};
 use pavfan_core::{Error, Result};
 use pavfan_ipc::MODES;
 use serde::{Deserialize, Serialize};
@@ -44,12 +45,27 @@ pub struct Thresholds {
     pub disengage_c: f32,
     pub gpu_bias_c: f32,
     pub hard_c: f32,
+    /// AUTO takes over only after this long at/above `engage_c` (debounces load spikes).
+    pub engage_delay_s: f32,
+    /// AUTO hands back only after this long at/below `disengage_c`.
+    pub release_delay_s: f32,
+    /// Once engaged, AUTO stays engaged at least this long.
+    pub min_engaged_s: f32,
 }
 
 impl Default for Thresholds {
     fn default() -> Self {
         let p = Params::default();
-        Self { engage_c: p.engage_c, disengage_c: p.disengage_c, gpu_bias_c: p.gpu_bias_c, hard_c: p.hard_c }
+        // Defaults are expressed for the default 1 s tick.
+        Self {
+            engage_c: p.engage_c,
+            disengage_c: p.disengage_c,
+            gpu_bias_c: p.gpu_bias_c,
+            hard_c: p.hard_c,
+            engage_delay_s: p.engage_ticks as f32,
+            release_delay_s: p.release_ticks as f32,
+            min_engaged_s: p.min_engaged_ticks as f32,
+        }
     }
 }
 
@@ -67,12 +83,20 @@ impl Config {
         toml::from_str(text)
     }
 
-    pub fn params(&self) -> Result<Params> {
+    /// Governor parameters; the delays are converted to ticks of `interval`.
+    pub fn params(&self, interval: Duration) -> Result<Params> {
+        let t = &self.thresholds;
+        if t.engage_delay_s < 0.0 || t.release_delay_s < 0.0 || t.min_engaged_s < 0.0 {
+            return Err(Error::Config("delays must not be negative".into()));
+        }
         let p = Params {
-            engage_c: self.thresholds.engage_c,
-            disengage_c: self.thresholds.disengage_c,
-            gpu_bias_c: self.thresholds.gpu_bias_c,
-            hard_c: self.thresholds.hard_c,
+            engage_c: t.engage_c,
+            disengage_c: t.disengage_c,
+            gpu_bias_c: t.gpu_bias_c,
+            hard_c: t.hard_c,
+            engage_ticks: secs_to_ticks(t.engage_delay_s, interval),
+            release_ticks: secs_to_ticks(t.release_delay_s, interval),
+            min_engaged_ticks: secs_to_ticks(t.min_engaged_s, interval),
             ..Params::default()
         };
         p.validate()?;
@@ -182,7 +206,8 @@ mod tests {
         assert_eq!(c.default_mode, "auto");
         assert_eq!(c.interval_ms, 1000);
         assert!((c.thresholds.hard_c - 88.0).abs() < 0.01);
-        assert!(c.params().is_ok());
+        let p = c.params(Duration::from_millis(500)).unwrap();
+        assert_eq!((p.engage_ticks, p.release_ticks, p.min_engaged_ticks), (10, 20, 60));
     }
 
     #[test]
@@ -191,7 +216,9 @@ mod tests {
         assert!((c.thresholds.engage_c - 70.0).abs() < 0.01);
         assert!((c.thresholds.disengage_c - 62.0).abs() < 0.01);
         let bad = Config::parse("[thresholds]\nhard_c = 99\n").unwrap();
-        assert!(bad.params().is_err());
+        assert!(bad.params(Duration::from_secs(1)).is_err());
+        let bad = Config::parse("[thresholds]\nengage_delay_s = -1\n").unwrap();
+        assert!(bad.params(Duration::from_secs(1)).is_err());
     }
 
     #[test]

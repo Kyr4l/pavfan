@@ -17,3 +17,9 @@
 # disengage_c = 62               # ...and hands back at/below this
 # gpu_bias_c = 8                 # -20..20
 # hard_c = 88                    # maximum fans at/above this, in every mode but OFF (max 90)
+# Timing (seconds). AUTO takes over only after the temperature has STAYED above
+# engage_c, then holds for a minimum time and releases only after a quiet period,
+# so a short load spike does not cause a few-second fan burst.
+# engage_delay_s = 5
+# release_delay_s = 10
+# min_engaged_s = 30

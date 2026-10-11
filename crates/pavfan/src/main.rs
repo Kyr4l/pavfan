@@ -22,7 +22,7 @@ use pavfan_core::ec::{
     DebugfsEc, EC_IO_PATH, EcIo, MemEc, ec_sys_loaded, ec_sys_write_enabled, ensure_ec_sys_loaded,
     ensure_ec_sys_writable,
 };
-use pavfan_core::governor::{Decision, Mode, Params};
+use pavfan_core::governor::{Decision, Mode, Params, secs_to_ticks};
 use pavfan_core::machine::{self, Compat, DMI_DIR};
 use pavfan_core::runtime::{Health, RECOVERY_TICKS, Runtime};
 use pavfan_core::sensors::{CpuTemp, GpuTemp};
@@ -138,6 +138,15 @@ struct RunArgs {
     /// in every mode but OFF (at most 90).
     #[arg(long, default_value_t = 88.0)]
     hard_c: f32,
+    /// AUTO: take over only after this many seconds at/above --engage-c (debounces spikes).
+    #[arg(long, default_value_t = 5.0)]
+    engage_delay_s: f32,
+    /// AUTO: hand back only after this many seconds at/below --disengage-c.
+    #[arg(long, default_value_t = 10.0)]
+    release_delay_s: f32,
+    /// AUTO: once engaged, stay engaged at least this many seconds.
+    #[arg(long, default_value_t = 30.0)]
+    min_engaged_s: f32,
     /// Take over even if the fans look externally controlled (NBFC, or a running pavfand).
     #[arg(long)]
     force: bool,
@@ -363,8 +372,9 @@ fn curve(file: Option<&Path>) -> Result<()> {
             let p = Params::default();
             println!(
                 "built-in AUTO curve over the effective temperature max(CPU, GPU {:+.0} C);\n\
-                 BIOS control below {:.0} C, hysteresis down to {:.0} C, maximum fans from {:.0} C:",
-                p.gpu_bias_c, p.engage_c, p.disengage_c, p.hard_c
+                 BIOS control below {:.0} C, hysteresis down to {:.0} C, maximum fans from {:.0} C;\n\
+                 takes over after {} s above, holds at least {} s, releases after {} s below (1 s ticks):",
+                p.gpu_bias_c, p.engage_c, p.disengage_c, p.hard_c, p.engage_ticks, p.min_engaged_ticks, p.release_ticks
             );
             default_auto(limits)?
         }
@@ -420,11 +430,15 @@ fn build_mode(a: &RunArgs, limits: Limits) -> Result<Mode> {
 }
 
 fn control_loop<E: EcIo>(ec: E, a: &RunArgs) -> Result<()> {
+    let interval = Duration::from_millis(a.interval_ms);
     let params = Params {
         gpu_bias_c: a.gpu_bias_c,
         engage_c: a.engage_c,
         disengage_c: a.disengage_c,
         hard_c: a.hard_c,
+        engage_ticks: secs_to_ticks(a.engage_delay_s, interval),
+        release_ticks: secs_to_ticks(a.release_delay_s, interval),
+        min_engaged_ticks: secs_to_ticks(a.min_engaged_s, interval),
         ..Params::default()
     };
     // FIXED/MANUAL need the EC limits, which the runtime learns on construction: start in
@@ -452,10 +466,13 @@ fn control_loop<E: EcIo>(ec: E, a: &RunArgs) -> Result<()> {
         "effective = max(CPU, GPU {:+.0} C) | AUTO engages at {:.0} C, releases at {:.0} C | hard max at {:.0} C",
         params.gpu_bias_c, params.engage_c, params.disengage_c, params.hard_c
     );
+    println!(
+        "AUTO timing: take over after {:.0} s above, hold at least {:.0} s, release after {:.0} s below",
+        a.engage_delay_s, a.min_engaged_s, a.release_delay_s
+    );
 
     let start = Instant::now();
     let deadline = a.duration.map(|d| start + Duration::from_secs(d));
-    let interval = Duration::from_millis(a.interval_ms);
     let mut last_key: Option<String> = None;
 
     let outcome = loop {

@@ -97,5 +97,9 @@ Both AUTO cases released cleanly to the BIOS at the end (see the `*_auto.log` fi
 * Under combined load the machine needs maximum fans anyway (sweep 3), so the curve reaches 42 at
   85 C and the hard override at 88 C is a backstop rather than the normal driver.
 * Curve: 68 C -> 30, 76 C -> 34, 82 C -> 39, 85 C -> 42 (levels in x100 RPM).
+* Timing (added after real use): taking over instantly on crossing 68 C produced few-second
+  fan bursts on short CPU spikes (silent -> level 30 -> silent). AUTO now takes over only
+  after 5 s above the threshold, holds at least 30 s, and releases after 10 s below 62 C.
+  The hard override at 88 C stays instant.
 
 Sweeps 4 and 5 measured this AUTO configuration against the BIOS: see above.

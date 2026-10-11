@@ -78,7 +78,6 @@ fn main() -> ExitCode {
 
 fn run(cli: &Cli) -> Result<()> {
     let cfg = Config::load(&cli.config)?;
-    let params = cfg.params()?;
 
     let id = machine::read_identity(Path::new(DMI_DIR))?;
     match machine::check(&id, cli.allow_unverified_bios)? {
@@ -89,6 +88,7 @@ fn run(cli: &Cli) -> Result<()> {
     }
 
     let interval = Duration::from_millis(cli.interval_ms.unwrap_or(cfg.interval_ms).clamp(250, 10_000));
+    let params = cfg.params(interval)?;
     let state = State::load(&cli.state_dir, &cfg);
 
     if cli.dry_run {
@@ -138,6 +138,10 @@ fn serve<E: EcIo>(
     println!(
         "pavfand: mode {mode_name} | EC limits {}..{} | tick {} ms | effective = max(CPU, GPU {:+.0} C) | engage {:.0} C, release {:.0} C, hard max {:.0} C",
         limits.min, limits.max, interval.as_millis(), params.gpu_bias_c, params.engage_c, params.disengage_c, params.hard_c
+    );
+    println!(
+        "pavfand: AUTO timing: take over after {} ticks above, hold at least {} ticks, release after {} ticks below",
+        params.engage_ticks, params.min_engaged_ticks, params.release_ticks
     );
 
     let shared = Arc::new(Mutex::new(Shared::new(limits, mode_name, state.fixed_percent, manual_points)));
