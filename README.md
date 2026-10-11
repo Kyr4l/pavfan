@@ -52,13 +52,14 @@ Then, as root: `zypper install ./target/pkg/pavfan-*.rpm` (openSUSE), `dnf insta
 * enables and starts `pavfand.service` in AUTO mode.
 
 `make install` / `make uninstall` do the same without a package manager (`DESTDIR=` supported).
+Shell completions for bash, zsh and fish are included (`pavfan completions <shell>` prints them).
 
 **Who may change the mode:** root and members of `wheel`, `sudo` or `pavfan`. Reading status is
 open to everyone. Add yourself with `usermod -aG pavfan $USER` if you are in none of those.
 
-**Tray:** launch "pavfan tray" from the application menu, then tick *Start at login* in its menu
-to create `~/.config/autostart/pavfan-tray.desktop` for your user only. Nothing starts
-system-wide. The icon colour is the state: grey OFF, blue AUTO deferring to the BIOS, green
+**Tray:** launch "pavfan tray" from the application menu; left or right click opens its menu.
+Tick *Start at login* there to create `~/.config/autostart/pavfan-tray.desktop` for your user
+only. Nothing starts system-wide. The icon colour is the state: grey OFF, blue AUTO deferring to the BIOS, green
 pavfan driving the fans, orange hard thermal override, red daemon unreachable.
 
 ## Use
@@ -86,6 +87,13 @@ pavfan run --dry-run --mode auto                      # in-memory EC, nothing wr
 sudo pavfan run --mode fixed --percent 50 --duration 20
 sudo pavfan release                                   # rescue: give the fans back to the BIOS
 ```
+
+## Windows
+
+There is no Windows port (yet; see `docs/`). What exists is a corrected **NBFC profile** built
+from these measurements, in [windows/nbfc/](windows/nbfc/): right EC limits, a clean hand-back
+that preserves the BIOS flags, and a measured curve. NBFC only sees the CPU temperature, so the
+GPU-heat fix that matters most on Linux cannot be reproduced there.
 
 ## Control modes
 

@@ -96,6 +96,9 @@ impl PavfanTray {
 }
 
 impl ksni::Tray for PavfanTray {
+    /// SNI `ItemIsMenu`: a left click opens the menu (Plasma, GNOME AppIndicator).
+    const MENU_ON_ACTIVATE: bool = true;
+
     fn id(&self) -> String {
         "pavfan".into()
     }
@@ -192,7 +195,7 @@ impl ksni::Tray for PavfanTray {
             }
             .into(),
             StandardItem {
-                label: "Quit tray (daemon keeps running)".into(),
+                label: "Exit tray".into(),
                 icon_name: "application-exit".into(),
                 activate: Box::new(|this: &mut Self| this.send(Cmd::Quit)),
                 ..Default::default()

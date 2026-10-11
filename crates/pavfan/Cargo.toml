@@ -12,6 +12,7 @@ publish.workspace = true
 pavfan-core = { path = "../pavfan-core" }
 pavfan-ipc = { path = "../pavfan-ipc" }
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 signal-hook = "0.3"
 zbus = { version = "5", default-features = false, features = ["tokio", "blocking-api"] }
 
@@ -59,6 +60,9 @@ assets = [
     ["../../packaging/icons/pavfan-active.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
     ["../../packaging/icons/pavfan-hot.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
     ["../../packaging/icons/pavfan-error.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
+    ["../../target/completions/pavfan.bash", "usr/share/bash-completion/completions/pavfan", "644"],
+    ["../../target/completions/_pavfan", "usr/share/zsh/vendor-completions/_pavfan", "644"],
+    ["../../target/completions/pavfan.fish", "usr/share/fish/vendor_completions.d/pavfan.fish", "644"],
     ["../../README.md", "usr/share/doc/pavfan/", "644"],
     ["../../docs/*.md", "usr/share/doc/pavfan/docs/", "644"],
 ]
@@ -109,6 +113,9 @@ assets = [
     { source = "packaging/icons/pavfan-active.svg", dest = "/usr/share/icons/hicolor/scalable/status/pavfan-active.svg", mode = "644" },
     { source = "packaging/icons/pavfan-hot.svg", dest = "/usr/share/icons/hicolor/scalable/status/pavfan-hot.svg", mode = "644" },
     { source = "packaging/icons/pavfan-error.svg", dest = "/usr/share/icons/hicolor/scalable/status/pavfan-error.svg", mode = "644" },
+    { source = "target/completions/pavfan.bash", dest = "/usr/share/bash-completion/completions/pavfan", mode = "644" },
+    { source = "target/completions/_pavfan", dest = "/usr/share/zsh/site-functions/_pavfan", mode = "644" },
+    { source = "target/completions/pavfan.fish", dest = "/usr/share/fish/vendor_completions.d/pavfan.fish", mode = "644" },
     { source = "LICENSE", dest = "/usr/share/licenses/pavfan/LICENSE", mode = "644", doc = true },
     { source = "README.md", dest = "/usr/share/doc/pavfan/README.md", mode = "644", doc = true },
     { source = "docs/*.md", dest = "/usr/share/doc/pavfan/docs/", mode = "644", doc = true },

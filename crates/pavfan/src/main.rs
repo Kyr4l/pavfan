@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use pavfan_core::controller::{Limits, emergency_release, nominal_rpm, read_status};
 use pavfan_core::curve::{default_auto, parse_curve};
 use pavfan_core::ec::{
@@ -75,6 +75,11 @@ enum Cmd {
     Curve {
         #[arg(long)]
         file: Option<PathBuf>,
+    },
+    /// Print shell completions (bash, zsh, fish, elvish, powershell) to stdout.
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
     },
 }
 
@@ -149,6 +154,10 @@ fn main() -> ExitCode {
         Cmd::Run(a) => run(&a),
         Cmd::Release(c) => release(&c),
         Cmd::Curve { file } => curve(file.as_deref()),
+        Cmd::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "pavfan", &mut std::io::stdout());
+            Ok(())
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

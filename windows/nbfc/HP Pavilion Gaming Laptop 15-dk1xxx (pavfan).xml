@@ -1,0 +1,87 @@
+<?xml version="1.0"?>
+<!--
+  NoteBook FanControl (NBFC) profile for the HP Pavilion Gaming Laptop 15-dk1xxx
+  (board 8742), derived from the pavfan project's measurements on BIOS F.50:
+  https://github.com/Kyr4l/fancontrol-hp-15-dk1xxx  (GPL-3.0-or-later)
+
+  What differs from the generic "HP 15-BW00x" profile people use on this machine:
+   * MinSpeedValue/MaxSpeedValue are the EC's own limits, 22..42 (units of 100 RPM),
+     read from EC registers 0x13/0x12. The generic profile's 19..53 is for another EC.
+   * On exit the override bit (0x0F bit 3) is cleared with an AND mask so the other
+     bits keep whatever the BIOS set (this machine boots with 0x0F = 0x01, not 0x05),
+     and the target (0x14) is returned to 0xFF = "unset".
+   * The curve follows the measured behaviour: there is ONE setpoint for both fans; the
+     GPU fan follows it strongly, the CPU fan only near 100 %. Below 60 C the lowest
+     level is used (22; note that even this keeps the GPU fan audibly spinning, unlike
+     the BIOS's own idle, because NBFC has no "hand back to BIOS" state).
+   * CriticalTemperature 88 matches pavfan's hard thermal override.
+
+  Limitation: NBFC only reads the CPU temperature. The BIOS problem that matters most
+  (ignoring GPU heat) cannot be fixed from here; pavfan on Linux weighs the GPU in.
+-->
+<FanControlConfigV2 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <NotebookModel>HP Pavilion Gaming Laptop 15-dk1xxx</NotebookModel>
+  <Author>pavfan project (measured on the hardware, BIOS F.50)</Author>
+  <EcPollInterval>1000</EcPollInterval>
+  <ReadWriteWords>false</ReadWriteWords>
+  <CriticalTemperature>88</CriticalTemperature>
+  <FanConfigurations>
+    <FanConfiguration>
+      <ReadRegister>17</ReadRegister>
+      <WriteRegister>20</WriteRegister>
+      <MinSpeedValue>22</MinSpeedValue>
+      <MaxSpeedValue>42</MaxSpeedValue>
+      <IndependentReadMinMaxValues>false</IndependentReadMinMaxValues>
+      <MinSpeedValueRead>0</MinSpeedValueRead>
+      <MaxSpeedValueRead>0</MaxSpeedValueRead>
+      <ResetRequired>true</ResetRequired>
+      <FanSpeedResetValue>255</FanSpeedResetValue>
+      <FanDisplayName>Fans (one setpoint: GPU fan follows it, CPU fan joins near 100%)</FanDisplayName>
+      <TemperatureThresholds>
+        <TemperatureThreshold>
+          <UpThreshold>0</UpThreshold>
+          <DownThreshold>0</DownThreshold>
+          <FanSpeed>0</FanSpeed>
+        </TemperatureThreshold>
+        <TemperatureThreshold>
+          <UpThreshold>60</UpThreshold>
+          <DownThreshold>54</DownThreshold>
+          <FanSpeed>10</FanSpeed>
+        </TemperatureThreshold>
+        <TemperatureThreshold>
+          <UpThreshold>68</UpThreshold>
+          <DownThreshold>62</DownThreshold>
+          <FanSpeed>40</FanSpeed>
+        </TemperatureThreshold>
+        <TemperatureThreshold>
+          <UpThreshold>76</UpThreshold>
+          <DownThreshold>70</DownThreshold>
+          <FanSpeed>60</FanSpeed>
+        </TemperatureThreshold>
+        <TemperatureThreshold>
+          <UpThreshold>82</UpThreshold>
+          <DownThreshold>77</DownThreshold>
+          <FanSpeed>85</FanSpeed>
+        </TemperatureThreshold>
+        <TemperatureThreshold>
+          <UpThreshold>85</UpThreshold>
+          <DownThreshold>80</DownThreshold>
+          <FanSpeed>100</FanSpeed>
+        </TemperatureThreshold>
+      </TemperatureThresholds>
+      <FanSpeedPercentageOverrides />
+    </FanConfiguration>
+  </FanConfigurations>
+  <RegisterWriteConfigurations>
+    <RegisterWriteConfiguration>
+      <WriteMode>Or</WriteMode>
+      <WriteOccasion>OnInitialization</WriteOccasion>
+      <Register>15</Register>
+      <Value>8</Value>
+      <ResetRequired>true</ResetRequired>
+      <ResetValue>247</ResetValue>
+      <ResetWriteMode>And</ResetWriteMode>
+      <Description>Fan override enable: set 0x0F bit 3 on start; on exit clear only that bit (AND 0xF7) so the BIOS's other flags are preserved</Description>
+    </RegisterWriteConfiguration>
+  </RegisterWriteConfigurations>
+</FanControlConfigV2>
