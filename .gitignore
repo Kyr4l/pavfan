@@ -1,0 +1,73 @@
+# ---------------------------------------------------------------------------
+# Personal / machine-specific data: NEVER commit.
+# Firmware & EC dumps contain serial numbers (battery, board), the hostname,
+# and other identifiers unique to the author's machine.
+# Put only sanitized, hand-written findings in docs/.
+# ---------------------------------------------------------------------------
+/discovery/
+/_cpr/
+/dumps/
+/traces/
+/scratch/
+
+# Raw captures / firmware tables, wherever they end up
+*.bin
+*.tsv
+*.dsl
+*.aml
+*.dat
+*.dump
+*.pcap
+*.log
+DSDT*
+SSDT*
+ECDT*
+MSDM*
+
+# Secrets / environment
+.env
+.env.*
+*.pem
+*.key
+*.secret
+secrets/
+credentials*
+
+# BIOS/firmware images and vendor update packages (copyrighted, and may embed
+# machine-specific data): keep local, analyse locally, never commit.
+/bios/
+*.fd
+*.rom
+*.cap
+*.cab
+*.exe
+*.wph
+*.efi
+
+# Windows-side data copied from the NTFS partition (NBFC configs/logs...)
+NbfcService*
+NbfcServiceSettings.xml
+
+# Editor / IDE / AI-assistant local state (can hold paths, usernames, history)
+.vscode/
+.idea/
+*.code-workspace
+.claude/
+.cursor/
+*.swp
+*~
+.DS_Store
+
+# Rust
+/target/
+**/*.rs.bk
+
+# Go (in case of experiments)
+/bin/
+*.test
+
+# Local packaging output
+/dist/
+/pkg/
+*.rpm
+*.deb
