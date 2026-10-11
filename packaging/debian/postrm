@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+case "$1" in
+  remove|purge)
+    systemctl daemon-reload >/dev/null 2>&1 || :
+    systemctl reload dbus.service >/dev/null 2>&1 || :
+    gtk-update-icon-cache -q /usr/share/icons/hicolor >/dev/null 2>&1 || :
+    ;;
+esac
+if [ "$1" = purge ]; then
+    rm -rf /var/lib/pavfan
+fi
+exit 0

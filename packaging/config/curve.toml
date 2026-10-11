@@ -1,0 +1,26 @@
+# MANUAL fan curve, over the effective temperature max(CPU, GPU + gpu_bias_c).
+# Each point: temp (C) and either percent (0-100 of the EC's fan range) or
+# level (units of 100 RPM, 22..42). Temperatures must increase; cooling must never
+# decrease with temperature. Between points the level is interpolated.
+#
+# In MANUAL mode pavfan always drives the fans (there is no "BIOS below X"), so the
+# first point is the floor. Note that even the lowest override level keeps the GPU
+# fan audibly spinning, unlike the BIOS's own idle.
+#
+# Validate with:  pavfan curve --file /etc/pavfan/curve.toml
+
+[[point]]
+temp = 55
+percent = 20
+
+[[point]]
+temp = 70
+percent = 50
+
+[[point]]
+temp = 80
+percent = 80
+
+[[point]]
+temp = 85
+percent = 100

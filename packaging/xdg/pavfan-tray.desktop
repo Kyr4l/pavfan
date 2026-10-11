@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=pavfan tray
+GenericName=Fan control
+Comment=Fan mode and temperatures for the HP Pavilion Gaming 15-dk1xxx
+Exec=pavfan-tray
+Icon=pavfan
+Terminal=false
+Categories=System;Monitor;
+Keywords=fan;cooling;temperature;HP;
+StartupNotify=false

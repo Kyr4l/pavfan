@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+case "$1" in
+  remove)
+    systemctl disable --now pavfand.service >/dev/null 2>&1 || :
+    ;;
+esac
+exit 0

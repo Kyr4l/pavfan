@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- pavfan status icon (daemon unreachable). GPL-3.0-or-later. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <circle cx="12" cy="12" r="10.6" fill="none" stroke="#808080" stroke-width="1.6"/>
+  <path d="M7.5 7.5 L16.5 16.5 M16.5 7.5 L7.5 16.5" stroke="#da4453" stroke-width="2.6" stroke-linecap="round" fill="none"/>
+</svg>

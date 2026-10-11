@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- pavfan status icon. GPL-3.0-or-later. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <circle cx="12" cy="12" r="10.6" fill="none" stroke="#808080" stroke-width="1.6"/>
+  <g fill="#3daee9"><path d="M12 12 L12 3.5 A8.5 8.5 0 0 1 19.99 9.09 Z"/><path d="M12 12 L19.36 16.25 A8.5 8.5 0 0 1 10.52 20.37 Z"/><path d="M12 12 L4.64 16.25 A8.5 8.5 0 0 1 5.49 6.54 Z"/></g>
+  <circle cx="12" cy="12" r="2.3" fill="#808080"/>
+</svg>

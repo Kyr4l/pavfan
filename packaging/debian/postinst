@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+case "$1" in
+  configure)
+    getent group pavfan >/dev/null 2>&1 || groupadd -r pavfan || :
+    systemctl daemon-reload >/dev/null 2>&1 || :
+    systemctl reload dbus.service >/dev/null 2>&1 || :
+    # ec_sys must allow writes; reload it if it is already loaded read-only.
+    if [ -d /sys/module/ec_sys ] && [ "$(cat /sys/module/ec_sys/parameters/write_support 2>/dev/null)" != Y ]; then
+        modprobe -r ec_sys >/dev/null 2>&1 || :
+    fi
+    modprobe ec_sys write_support=1 >/dev/null 2>&1 || :
+    if [ -z "$2" ]; then
+        systemctl enable --now pavfand.service >/dev/null 2>&1 || :
+    else
+        systemctl try-restart pavfand.service >/dev/null 2>&1 || :
+    fi
+    gtk-update-icon-cache -q /usr/share/icons/hicolor >/dev/null 2>&1 || :
+    ;;
+esac
+exit 0
