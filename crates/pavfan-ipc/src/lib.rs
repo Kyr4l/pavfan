@@ -13,12 +13,16 @@ pub const OBJECT_PATH: &str = "/org/pavfan/Daemon1";
 pub const INTERFACE: &str = "org.pavfan.Daemon1";
 /// Mode names accepted by `SetMode`.
 pub const MODES: [&str; 4] = ["off", "auto", "fixed", "manual"];
+/// AUTO profile names accepted by `SetAutoProfile`.
+pub const AUTO_PROFILES: [&str; 2] = ["quiet", "early"];
 
 /// Snapshot of the daemon's state, refreshed every control tick.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
 pub struct Status {
     /// "off" | "auto" | "fixed" | "manual"
     pub mode: String,
+    /// AUTO behaviour: "quiet" (BIOS until 68 C, then take over) or "early" (from 58 C, small steps).
+    pub auto_profile: String,
     /// Target used by FIXED mode, in percent of the EC range.
     pub fixed_percent: u8,
     /// Whether a MANUAL curve is configured (MANUAL can only be selected if so).
@@ -58,6 +62,8 @@ pub trait Daemon1 {
     fn set_mode(&self, mode: &str) -> zbus::Result<()>;
     /// 0..=100; takes effect in FIXED mode.
     fn set_fixed_percent(&self, percent: u8) -> zbus::Result<()>;
+    /// "quiet" | "early"; takes effect in AUTO mode (also remembered for later).
+    fn set_auto_profile(&self, profile: &str) -> zbus::Result<()>;
     /// Points as (temperature C, percent of the EC range); validated by the daemon.
     fn set_manual_curve(&self, points: Vec<(f64, u8)>) -> zbus::Result<()>;
     fn get_manual_curve(&self) -> zbus::Result<Vec<(f64, u8)>>;

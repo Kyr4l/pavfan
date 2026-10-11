@@ -99,6 +99,14 @@ impl<E: EcIo> Runtime<E> {
         Ok(())
     }
 
+    /// Replace the governor parameters (e.g. another AUTO profile), keeping the mode.
+    pub fn set_params(&mut self, params: Params) -> Result<()> {
+        let mode = self.governor.mode().clone();
+        self.governor = Governor::new(mode, params, self.limits())?;
+        self.params = params;
+        Ok(())
+    }
+
     /// One control step. `Err` only for EC failures, which are fatal for the
     /// caller (dropping the runtime still hands the fans back).
     pub fn tick(&mut self) -> Result<TickReport> {

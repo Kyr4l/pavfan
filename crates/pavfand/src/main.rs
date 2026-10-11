@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use pavfan_core::controller::{Limits, TARGET_UNSET, emergency_release, nominal_rpm, read_status};
 use pavfan_core::ec::{DebugfsEc, EcIo, MemEc, ensure_ec_sys_writable};
-use pavfan_core::governor::Mode;
+use pavfan_core::governor::{AutoProfile, Mode, Params};
 use pavfan_core::machine::{self, Compat, DMI_DIR};
 use pavfan_core::runtime::{Health, RECOVERY_TICKS, Runtime, TickReport};
 use pavfan_core::{Error, Result};
@@ -88,8 +88,10 @@ fn run(cli: &Cli) -> Result<()> {
     }
 
     let interval = Duration::from_millis(cli.interval_ms.unwrap_or(cfg.interval_ms).clamp(250, 10_000));
-    let params = cfg.params(interval)?;
+    cfg.default_profile()?; // fail early on a bad config value
     let state = State::load(&cli.state_dir, &cfg);
+    let profile = AutoProfile::parse(&state.auto_profile).unwrap_or_default();
+    let params = cfg.params(interval, profile)?;
 
     if cli.dry_run {
         println!("pavfand: DRY RUN: in-memory EC, hardware untouched");
@@ -101,14 +103,7 @@ fn run(cli: &Cli) -> Result<()> {
     serve(DebugfsEc::open()?, cli, &cfg, params, state, interval)
 }
 
-fn serve<E: EcIo>(
-    mut ec: E,
-    cli: &Cli,
-    cfg: &Config,
-    params: pavfan_core::governor::Params,
-    state: State,
-    interval: Duration,
-) -> Result<()> {
+fn serve<E: EcIo>(mut ec: E, cli: &Cli, cfg: &Config, params: Params, state: State, interval: Duration) -> Result<()> {
     // A previous instance that was SIGKILLed may have left its override in place.
     // This daemon is the system's fan owner, so take over rather than refuse.
     let st = read_status(&mut ec)?;
@@ -136,15 +131,15 @@ fn serve<E: EcIo>(
         eprintln!("pavfand: note: no NVIDIA GPU sensor available; deciding on CPU temperature only");
     }
     println!(
-        "pavfand: mode {mode_name} | EC limits {}..{} | tick {} ms | effective = max(CPU, GPU {:+.0} C) | engage {:.0} C, release {:.0} C, hard max {:.0} C",
-        limits.min, limits.max, interval.as_millis(), params.gpu_bias_c, params.engage_c, params.disengage_c, params.hard_c
+        "pavfand: mode {mode_name} | AUTO profile {} | EC limits {}..{} | tick {} ms | effective = max(CPU, GPU {:+.0} C) | engage {:.0} C, release {:.0} C, hard max {:.0} C",
+        params.auto_profile.name(), limits.min, limits.max, interval.as_millis(), params.gpu_bias_c, params.engage_c, params.disengage_c, params.hard_c
     );
     println!(
         "pavfand: AUTO timing: take over after {} ticks above, hold at least {} ticks, release after {} ticks below",
         params.engage_ticks, params.min_engaged_ticks, params.release_ticks
     );
 
-    let shared = Arc::new(Mutex::new(Shared::new(limits, mode_name, state.fixed_percent, manual_points)));
+    let shared = Arc::new(Mutex::new(Shared::new(limits, mode_name, params.auto_profile, state.fixed_percent, manual_points)));
     let conn = match connect(cli.session_bus, Arc::clone(&shared)) {
         Ok(c) => {
             println!("pavfand: serving {BUS_NAME} on the {} bus", if cli.session_bus { "session" } else { "system" });
@@ -175,7 +170,7 @@ fn serve<E: EcIo>(
 
         let requests = std::mem::take(&mut lock(&shared).pending);
         for req in requests {
-            apply(&mut rt, &shared, req, &cli.state_dir, conn.as_ref());
+            apply(&mut rt, &shared, req, &cli.state_dir, conn.as_ref(), cfg, interval);
         }
 
         let report = match rt.tick() {
@@ -247,16 +242,44 @@ fn build_mode(name: &str, fixed_percent: u8, points: &[(f64, u8)], limits: Limit
 }
 
 /// Apply one queued request: rebuild the governor, persist, announce.
-fn apply<E: EcIo>(rt: &mut Runtime<E>, shared: &Arc<Mutex<Shared>>, req: Request, state_dir: &Path, conn: Option<&Connection>) {
-    let (cur_mode, cur_fixed, cur_points) = {
+fn apply<E: EcIo>(
+    rt: &mut Runtime<E>,
+    shared: &Arc<Mutex<Shared>>,
+    req: Request,
+    state_dir: &Path,
+    conn: Option<&Connection>,
+    cfg: &Config,
+    interval: Duration,
+) {
+    let (cur_mode, cur_fixed, cur_points, cur_profile) = {
         let s = lock(shared);
-        (s.mode_name.clone(), s.fixed_percent, s.manual_points.clone())
+        (s.mode_name.clone(), s.fixed_percent, s.manual_points.clone(), s.auto_profile)
     };
+
+    if let Request::Profile(profile) = req {
+        let params = match cfg.params(interval, profile) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("pavfand: profile '{}' rejected: {e}", profile.name());
+                return;
+            }
+        };
+        if let Err(e) = rt.set_params(params) {
+            eprintln!("pavfand: could not switch AUTO profile: {e}");
+            return;
+        }
+        lock(shared).auto_profile = profile;
+        println!("pavfand: request applied: AUTO profile {}", profile.name());
+        State { mode: cur_mode, fixed_percent: cur_fixed, auto_profile: profile.name().into() }.save(state_dir);
+        return;
+    }
+
     let curve_changed = matches!(req, Request::Curve(_));
     let (mode_name, fixed, points) = match req {
         Request::Mode(m) => (m, cur_fixed, cur_points),
         Request::FixedPercent(p) => (cur_mode, p, cur_points),
         Request::Curve(pts) => (cur_mode, cur_fixed, pts),
+        Request::Profile(_) => return, // handled above
     };
 
     let mode = match build_mode(&mode_name, fixed, &points, rt.limits()) {
@@ -280,7 +303,7 @@ fn apply<E: EcIo>(rt: &mut Runtime<E>, shared: &Arc<Mutex<Shared>>, req: Request
         changed
     };
     println!("pavfand: request applied: mode {mode_name}, fixed {fixed}%, manual curve {} points", points.len());
-    State { mode: mode_name.clone(), fixed_percent: fixed }.save(state_dir);
+    State { mode: mode_name.clone(), fixed_percent: fixed, auto_profile: cur_profile.name().into() }.save(state_dir);
     if curve_changed {
         save_curve_points(state_dir, &points);
     }
@@ -304,6 +327,7 @@ fn make_status(r: &TickReport, limits: Limits, s: &Shared, gpu_present: bool) ->
     };
     Status {
         mode: s.mode_name.clone(),
+        auto_profile: s.auto_profile.name().into(),
         fixed_percent: s.fixed_percent,
         has_manual_curve: !s.manual_points.is_empty(),
         level: r.level,
@@ -336,7 +360,8 @@ fn summary(s: &Status) -> String {
         format!("BIOS control (level {})", s.level)
     };
     let health = if s.health == "ok" { String::new() } else { format!(" [{}: {}]", s.health, s.detail) };
-    format!("mode {} | {temps} | {fans}{health}", s.mode)
+    let profile = if s.mode == "auto" { format!(" ({})", s.auto_profile) } else { String::new() };
+    format!("mode {}{profile} | {temps} | {fans}{health}", s.mode)
 }
 
 #[cfg(test)]

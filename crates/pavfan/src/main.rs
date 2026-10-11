@@ -17,12 +17,12 @@ use std::time::{Duration, Instant};
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use pavfan_core::controller::{Limits, emergency_release, nominal_rpm, read_status};
-use pavfan_core::curve::{default_auto, parse_curve};
+use pavfan_core::curve::{auto_curve, parse_curve};
 use pavfan_core::ec::{
     DebugfsEc, EC_IO_PATH, EcIo, MemEc, ec_sys_loaded, ec_sys_write_enabled, ensure_ec_sys_loaded,
     ensure_ec_sys_writable,
 };
-use pavfan_core::governor::{Decision, Mode, Params, secs_to_ticks};
+use pavfan_core::governor::{AutoProfile, Decision, Mode, Params, secs_to_ticks};
 use pavfan_core::machine::{self, Compat, DMI_DIR};
 use pavfan_core::runtime::{Health, RECOVERY_TICKS, Runtime};
 use pavfan_core::sensors::{CpuTemp, GpuTemp};
@@ -58,12 +58,13 @@ struct Common {
 enum Cmd {
     /// Show daemon status (if running), machine compatibility, EC state and temperatures.
     Status(Common),
-    /// Ask the running daemon to change mode: off | auto | fixed [PERCENT] | manual.
+    /// Ask the running daemon to change mode: off | auto [quiet|early] | fixed [PERCENT] | manual.
     Set {
         #[arg(value_enum)]
         mode: ModeArg,
-        /// FIXED: percent of the fan range (0-100). Keeps the previous value if omitted.
-        percent: Option<u8>,
+        /// FIXED: percent of the fan range (0-100). AUTO: profile, quiet or early.
+        /// Omitted: keep the current value.
+        value: Option<String>,
         #[command(flatten)]
         common: Common,
     },
@@ -71,10 +72,13 @@ enum Cmd {
     Run(RunArgs),
     /// Rescue: hand the fans back to the BIOS (clears a stuck override).
     Release(Common),
-    /// Print the built-in AUTO curve, or validate a curve file.
+    /// Print a built-in AUTO curve, or validate a curve file.
     Curve {
         #[arg(long)]
         file: Option<PathBuf>,
+        /// Which built-in AUTO profile to print.
+        #[arg(long, value_enum, default_value = "quiet")]
+        profile: ProfileArg,
     },
     /// Print shell completions (bash, zsh, fish, elvish, powershell) to stdout.
     Completions {
@@ -89,6 +93,23 @@ enum ModeArg {
     Auto,
     Fixed,
     Manual,
+}
+
+#[derive(Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum ProfileArg {
+    /// BIOS control until 68 C, then take over (silent most of the time, audible steps).
+    Quiet,
+    /// Take over from 58 C with small steps (no steps, a low hum more often).
+    Early,
+}
+
+impl ProfileArg {
+    fn core(self) -> AutoProfile {
+        match self {
+            ProfileArg::Quiet => AutoProfile::Quiet,
+            ProfileArg::Early => AutoProfile::Early,
+        }
+    }
 }
 
 impl ModeArg {
@@ -109,6 +130,9 @@ struct RunArgs {
     /// OFF = BIOS control, AUTO = built-in curve, FIXED = constant, MANUAL = your curve.
     #[arg(long, value_enum, default_value = "auto")]
     mode: ModeArg,
+    /// AUTO: which built-in behaviour to start from (the flags below override its presets).
+    #[arg(long, value_enum, default_value = "quiet")]
+    auto_profile: ProfileArg,
     /// FIXED: level in units of 100 RPM (clamped to the EC range, 22..42).
     #[arg(long, conflicts_with = "percent")]
     level: Option<u8>,
@@ -124,29 +148,29 @@ struct RunArgs {
     /// Stop after this many seconds (default: run until interrupted).
     #[arg(long)]
     duration: Option<u64>,
-    /// AUTO: take over from the BIOS at/above this effective temperature (C).
-    #[arg(long, default_value_t = 68.0)]
-    engage_c: f32,
-    /// AUTO: hand back to the BIOS at/below this effective temperature (C).
-    #[arg(long, default_value_t = 62.0)]
-    disengage_c: f32,
-    /// Added to the GPU temperature before comparing it with the CPU's (-20..20).
+    /// AUTO: take over from the BIOS at/above this effective temperature (C). Default: profile preset.
+    #[arg(long)]
+    engage_c: Option<f32>,
+    /// AUTO: hand back to the BIOS at/below this effective temperature (C). Default: profile preset.
+    #[arg(long)]
+    disengage_c: Option<f32>,
+    /// Added to the GPU temperature before comparing it with the CPU's (-20..20; default 8).
     /// The BIOS ignores GPU heat and the GPU fan is the one the EC setpoint really drives.
-    #[arg(long, default_value_t = 8.0)]
-    gpu_bias_c: f32,
+    #[arg(long)]
+    gpu_bias_c: Option<f32>,
     /// Hard thermal override: maximum fans at/above this effective temperature,
-    /// in every mode but OFF (at most 90).
-    #[arg(long, default_value_t = 88.0)]
-    hard_c: f32,
-    /// AUTO: take over only after this many seconds at/above --engage-c (debounces spikes).
-    #[arg(long, default_value_t = 5.0)]
-    engage_delay_s: f32,
-    /// AUTO: hand back only after this many seconds at/below --disengage-c.
-    #[arg(long, default_value_t = 10.0)]
-    release_delay_s: f32,
-    /// AUTO: once engaged, stay engaged at least this many seconds.
-    #[arg(long, default_value_t = 30.0)]
-    min_engaged_s: f32,
+    /// in every mode but OFF (at most 90; default 88).
+    #[arg(long)]
+    hard_c: Option<f32>,
+    /// AUTO: take over only after this many seconds at/above --engage-c. Default: profile preset.
+    #[arg(long)]
+    engage_delay_s: Option<f32>,
+    /// AUTO: hand back only after this many seconds at/below --disengage-c. Default: profile preset.
+    #[arg(long)]
+    release_delay_s: Option<f32>,
+    /// AUTO: once engaged, stay engaged at least this many seconds. Default: profile preset.
+    #[arg(long)]
+    min_engaged_s: Option<f32>,
     /// Take over even if the fans look externally controlled (NBFC, or a running pavfand).
     #[arg(long)]
     force: bool,
@@ -159,10 +183,10 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.cmd {
         Cmd::Status(c) => status(&c),
-        Cmd::Set { mode, percent, common } => set(&common, mode, percent),
+        Cmd::Set { mode, value, common } => set(&common, mode, value.as_deref()),
         Cmd::Run(a) => run(&a),
         Cmd::Release(c) => release(&c),
-        Cmd::Curve { file } => curve(file.as_deref()),
+        Cmd::Curve { file, profile } => curve(file.as_deref(), profile.core()),
         Cmd::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "pavfan", &mut std::io::stdout());
             Ok(())
@@ -229,9 +253,13 @@ fn daemon_proxy(c: &Common) -> Result<Daemon1ProxyBlocking<'static>> {
 }
 
 fn print_daemon_status(s: &Status) {
-    let fixed = if s.mode == "fixed" { format!(" ({}%)", s.fixed_percent) } else { String::new() };
+    let detail = match s.mode.as_str() {
+        "fixed" => format!(" ({}%)", s.fixed_percent),
+        "auto" => format!(" ({})", s.auto_profile),
+        _ => String::new(),
+    };
     println!(
-        "pavfand {}: mode {}{fixed}{}",
+        "pavfand {}: mode {}{detail}{}",
         s.version,
         s.mode,
         if s.has_manual_curve { "" } else { " [no manual curve configured]" }
@@ -318,16 +346,30 @@ fn status(c: &Common) -> Result<()> {
 
 // ------------------------------------------------------------------- set --
 
-fn set(c: &Common, mode: ModeArg, percent: Option<u8>) -> Result<()> {
-    if let Some(p) = percent
-        && (p > 100 || mode != ModeArg::Fixed)
-    {
-        return Err(Error::Config("a percent (0-100) only makes sense with `set fixed`".into()));
-    }
+fn set(c: &Common, mode: ModeArg, value: Option<&str>) -> Result<()> {
     let proxy = daemon_proxy(c)?;
     let ipc = |e: zbus::Error| Error::Ipc(e.to_string());
-    if let Some(p) = percent {
-        proxy.set_fixed_percent(p).map_err(ipc)?;
+    match (mode, value) {
+        (ModeArg::Fixed, Some(v)) => {
+            let percent: u8 = v
+                .parse()
+                .ok()
+                .filter(|p| *p <= 100)
+                .ok_or_else(|| Error::Config(format!("`set fixed` takes a percent 0-100, not '{v}'")))?;
+            proxy.set_fixed_percent(percent).map_err(ipc)?;
+        }
+        (ModeArg::Auto, Some(v)) => {
+            let profile = AutoProfile::parse(v)
+                .ok_or_else(|| Error::Config(format!("`set auto` takes a profile, quiet or early, not '{v}'")))?;
+            proxy.set_auto_profile(profile.name()).map_err(ipc)?;
+        }
+        (_, Some(v)) => {
+            return Err(Error::Config(format!(
+                "`set {}` takes no value ('{v}' given); only `set fixed <percent>` and `set auto <profile>` do",
+                mode.name()
+            )));
+        }
+        (_, None) => {}
     }
     proxy.set_mode(mode.name()).map_err(ipc)?;
     // Give the control loop one tick to apply it, then show the result.
@@ -360,7 +402,7 @@ fn release(c: &Common) -> Result<()> {
 
 // ----------------------------------------------------------------- curve --
 
-fn curve(file: Option<&Path>) -> Result<()> {
+fn curve(file: Option<&Path>, profile: AutoProfile) -> Result<()> {
     let limits = Limits { min: 22, max: 42 };
     let c = match file {
         Some(p) => {
@@ -369,14 +411,23 @@ fn curve(file: Option<&Path>) -> Result<()> {
             parse_curve(&text, limits)?
         }
         None => {
-            let p = Params::default();
+            let p = profile.params();
             println!(
-                "built-in AUTO curve over the effective temperature max(CPU, GPU {:+.0} C);\n\
-                 BIOS control below {:.0} C, hysteresis down to {:.0} C, maximum fans from {:.0} C;\n\
+                "built-in AUTO curve, profile '{}' ({});\n\
+                 over the effective temperature max(CPU, GPU {:+.0} C): BIOS control below {:.0} C, \
+                 hysteresis down to {:.0} C, maximum fans from {:.0} C;\n\
                  takes over after {} s above, holds at least {} s, releases after {} s below (1 s ticks):",
-                p.gpu_bias_c, p.engage_c, p.disengage_c, p.hard_c, p.engage_ticks, p.min_engaged_ticks, p.release_ticks
+                profile.name(),
+                profile.description(),
+                p.gpu_bias_c,
+                p.engage_c,
+                p.disengage_c,
+                p.hard_c,
+                p.engage_ticks,
+                p.min_engaged_ticks,
+                p.release_ticks
             );
-            default_auto(limits)?
+            auto_curve(profile, limits)?
         }
     };
     for p in c.points() {
@@ -431,15 +482,16 @@ fn build_mode(a: &RunArgs, limits: Limits) -> Result<Mode> {
 
 fn control_loop<E: EcIo>(ec: E, a: &RunArgs) -> Result<()> {
     let interval = Duration::from_millis(a.interval_ms);
+    let base = a.auto_profile.core().params().rescale_ticks(interval);
     let params = Params {
-        gpu_bias_c: a.gpu_bias_c,
-        engage_c: a.engage_c,
-        disengage_c: a.disengage_c,
-        hard_c: a.hard_c,
-        engage_ticks: secs_to_ticks(a.engage_delay_s, interval),
-        release_ticks: secs_to_ticks(a.release_delay_s, interval),
-        min_engaged_ticks: secs_to_ticks(a.min_engaged_s, interval),
-        ..Params::default()
+        gpu_bias_c: a.gpu_bias_c.unwrap_or(base.gpu_bias_c),
+        engage_c: a.engage_c.unwrap_or(base.engage_c),
+        disengage_c: a.disengage_c.unwrap_or(base.disengage_c),
+        hard_c: a.hard_c.unwrap_or(base.hard_c),
+        engage_ticks: a.engage_delay_s.map_or(base.engage_ticks, |s| secs_to_ticks(s, interval)),
+        release_ticks: a.release_delay_s.map_or(base.release_ticks, |s| secs_to_ticks(s, interval)),
+        min_engaged_ticks: a.min_engaged_s.map_or(base.min_engaged_ticks, |s| secs_to_ticks(s, interval)),
+        ..base
     };
     // FIXED/MANUAL need the EC limits, which the runtime learns on construction: start in
     // AUTO (writes nothing) and switch before the first tick.
@@ -463,12 +515,12 @@ fn control_loop<E: EcIo>(ec: E, a: &RunArgs) -> Result<()> {
         a.interval_ms
     );
     println!(
-        "effective = max(CPU, GPU {:+.0} C) | AUTO engages at {:.0} C, releases at {:.0} C | hard max at {:.0} C",
-        params.gpu_bias_c, params.engage_c, params.disengage_c, params.hard_c
+        "AUTO profile {} | effective = max(CPU, GPU {:+.0} C) | engages at {:.0} C, releases at {:.0} C | hard max at {:.0} C",
+        params.auto_profile.name(), params.gpu_bias_c, params.engage_c, params.disengage_c, params.hard_c
     );
     println!(
-        "AUTO timing: take over after {:.0} s above, hold at least {:.0} s, release after {:.0} s below",
-        a.engage_delay_s, a.min_engaged_s, a.release_delay_s
+        "AUTO timing: take over after {} ticks above, hold at least {} ticks, release after {} ticks below ({} ms ticks)",
+        params.engage_ticks, params.min_engaged_ticks, params.release_ticks, a.interval_ms
     );
 
     let start = Instant::now();

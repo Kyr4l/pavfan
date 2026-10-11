@@ -5,11 +5,14 @@
 # and wins over default_mode after the first change.
 
 # default_mode = "auto"          # off | auto | fixed | manual
+# auto_profile = "quiet"         # quiet | early (see README, "Control modes")
 # fixed_percent = 50             # FIXED mode target, percent of the EC's fan range
 # interval_ms = 1000             # control loop period (250..10000)
 # manual_curve = "/etc/pavfan/curve.toml"
 
 # [thresholds]
+# Every key here is optional and OVERRIDES the selected profile's preset. The values
+# shown are the "quiet" presets; "early" uses engage 58 / disengage 52, 2 s / 15 s / 45 s.
 # Decisions use the "effective" temperature max(CPU, GPU + gpu_bias_c). The GPU is
 # weighted up because the BIOS ignores GPU heat and the GPU fan is the one the
 # EC setpoint really drives (see docs/thermal-measurements.md).

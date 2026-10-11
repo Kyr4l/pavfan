@@ -11,9 +11,10 @@ tray are plain clients of it.
 
 | Method | Signature | Notes |
 |---|---|---|
-| `GetStatus()` | `→ (sybyyyybbddbdsss)` | See the `Status` fields below. Refreshed every control tick. |
+| `GetStatus()` | `→ (ssybyyyybbddbdsss)` | See the `Status` fields below. Refreshed every control tick. |
 | `SetMode(mode)` | `s →` | `"off"`, `"auto"`, `"fixed"` or `"manual"`. `"manual"` fails unless a curve is configured. |
 | `SetFixedPercent(percent)` | `y →` | 0–100 % of the EC's fan range; used by FIXED mode. |
+| `SetAutoProfile(profile)` | `s →` | `"quiet"` or `"early"`; the AUTO behaviour, remembered like the mode. |
 | `SetManualCurve(points)` | `a(dy) →` | `(temperature C, percent)` points. Validated like a curve file: temperatures strictly increasing, cooling never decreasing, 2+ points. |
 | `GetManualCurve()` | `→ a(dy)` | The current MANUAL curve (empty if none). |
 
@@ -32,6 +33,7 @@ default): methods never touch the EC themselves. Call `GetStatus` afterwards to 
 | Field | Type | Meaning |
 |---|---|---|
 | `mode` | s | off / auto / fixed / manual |
+| `auto_profile` | s | quiet / early |
 | `fixed_percent` | y | FIXED target, percent |
 | `has_manual_curve` | b | a MANUAL curve is configured |
 | `level` | y | fan level the EC is running, units of 100 RPM (ours when `engaged`, the BIOS's otherwise) |
@@ -53,10 +55,11 @@ default): methods never touch the EC themselves. Call `GetStatus` afterwards to 
 busctl introspect org.pavfan.Daemon1 /org/pavfan/Daemon1
 busctl call org.pavfan.Daemon1 /org/pavfan/Daemon1 org.pavfan.Daemon1 GetStatus
 busctl call org.pavfan.Daemon1 /org/pavfan/Daemon1 org.pavfan.Daemon1 SetMode s fixed
+busctl call org.pavfan.Daemon1 /org/pavfan/Daemon1 org.pavfan.Daemon1 SetAutoProfile s early
 busctl call org.pavfan.Daemon1 /org/pavfan/Daemon1 org.pavfan.Daemon1 SetManualCurve 'a(dy)' 3 55 20 70 50 85 100
 ```
 
-The same through the CLI: `pavfan status`, `pavfan set fixed 75`, `pavfan set manual`.
+The same through the CLI: `pavfan status`, `pavfan set fixed 75`, `pavfan set auto early`, `pavfan set manual`.
 
 For development, `pavfand --dry-run --session-bus` serves the same interface on the session bus
 against an in-memory EC; `pavfan --session-bus ...` and `pavfan-tray --session-bus` talk to it.

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use pavfan_core::controller::Limits;
 use pavfan_core::curve::{Curve, Point, parse_curve};
-use pavfan_core::governor::{Params, secs_to_ticks};
+use pavfan_core::governor::{AutoProfile, Params, secs_to_ticks};
 use pavfan_core::{Error, Result};
 use pavfan_ipc::MODES;
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,8 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     /// Mode used when no saved state exists: off | auto | fixed | manual.
     pub default_mode: String,
+    /// AUTO profile used when no saved state exists: quiet | early.
+    pub auto_profile: String,
     pub fixed_percent: u8,
     pub interval_ms: u64,
     /// MANUAL curve file (same format as `pavfan curve --file`).
@@ -30,6 +32,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             default_mode: "auto".into(),
+            auto_profile: "quiet".into(),
             fixed_percent: 50,
             interval_ms: 1000,
             manual_curve: PathBuf::from("/etc/pavfan/curve.toml"),
@@ -38,35 +41,20 @@ impl Default for Config {
     }
 }
 
-#[derive(Debug, Deserialize)]
+/// Every key is optional and overrides the selected AUTO profile's preset when set.
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Thresholds {
-    pub engage_c: f32,
-    pub disengage_c: f32,
-    pub gpu_bias_c: f32,
-    pub hard_c: f32,
+    pub engage_c: Option<f32>,
+    pub disengage_c: Option<f32>,
+    pub gpu_bias_c: Option<f32>,
+    pub hard_c: Option<f32>,
     /// AUTO takes over only after this long at/above `engage_c` (debounces load spikes).
-    pub engage_delay_s: f32,
+    pub engage_delay_s: Option<f32>,
     /// AUTO hands back only after this long at/below `disengage_c`.
-    pub release_delay_s: f32,
+    pub release_delay_s: Option<f32>,
     /// Once engaged, AUTO stays engaged at least this long.
-    pub min_engaged_s: f32,
-}
-
-impl Default for Thresholds {
-    fn default() -> Self {
-        let p = Params::default();
-        // Defaults are expressed for the default 1 s tick.
-        Self {
-            engage_c: p.engage_c,
-            disengage_c: p.disengage_c,
-            gpu_bias_c: p.gpu_bias_c,
-            hard_c: p.hard_c,
-            engage_delay_s: p.engage_ticks as f32,
-            release_delay_s: p.release_ticks as f32,
-            min_engaged_s: p.min_engaged_ticks as f32,
-        }
-    }
+    pub min_engaged_s: Option<f32>,
 }
 
 impl Config {
@@ -83,21 +71,29 @@ impl Config {
         toml::from_str(text)
     }
 
-    /// Governor parameters; the delays are converted to ticks of `interval`.
-    pub fn params(&self, interval: Duration) -> Result<Params> {
+    /// The configured default AUTO profile; an unknown name is an error (we refuse to guess).
+    pub fn default_profile(&self) -> Result<AutoProfile> {
+        AutoProfile::parse(&self.auto_profile)
+            .ok_or_else(|| Error::Config(format!("auto_profile '{}' must be one of quiet, early", self.auto_profile)))
+    }
+
+    /// Governor parameters for `profile`: its presets (ticks rescaled to `interval`),
+    /// overridden by whatever `[thresholds]` keys are set.
+    pub fn params(&self, interval: Duration, profile: AutoProfile) -> Result<Params> {
         let t = &self.thresholds;
-        if t.engage_delay_s < 0.0 || t.release_delay_s < 0.0 || t.min_engaged_s < 0.0 {
+        if [t.engage_delay_s, t.release_delay_s, t.min_engaged_s].into_iter().flatten().any(|d| d < 0.0) {
             return Err(Error::Config("delays must not be negative".into()));
         }
+        let base = profile.params().rescale_ticks(interval);
         let p = Params {
-            engage_c: t.engage_c,
-            disengage_c: t.disengage_c,
-            gpu_bias_c: t.gpu_bias_c,
-            hard_c: t.hard_c,
-            engage_ticks: secs_to_ticks(t.engage_delay_s, interval),
-            release_ticks: secs_to_ticks(t.release_delay_s, interval),
-            min_engaged_ticks: secs_to_ticks(t.min_engaged_s, interval),
-            ..Params::default()
+            engage_c: t.engage_c.unwrap_or(base.engage_c),
+            disengage_c: t.disengage_c.unwrap_or(base.disengage_c),
+            gpu_bias_c: t.gpu_bias_c.unwrap_or(base.gpu_bias_c),
+            hard_c: t.hard_c.unwrap_or(base.hard_c),
+            engage_ticks: t.engage_delay_s.map_or(base.engage_ticks, |s| secs_to_ticks(s, interval)),
+            release_ticks: t.release_delay_s.map_or(base.release_ticks, |s| secs_to_ticks(s, interval)),
+            min_engaged_ticks: t.min_engaged_s.map_or(base.min_engaged_ticks, |s| secs_to_ticks(s, interval)),
+            ..base
         };
         p.validate()?;
         Ok(p)
@@ -109,6 +105,13 @@ impl Config {
 pub struct State {
     pub mode: String,
     pub fixed_percent: u8,
+    /// Missing in state files written by 0.1.x.
+    #[serde(default = "quiet")]
+    pub auto_profile: String,
+}
+
+fn quiet() -> String {
+    "quiet".into()
 }
 
 const STATE_FILE: &str = "state.toml";
@@ -117,10 +120,19 @@ const CURVE_FILE: &str = "curve.toml";
 impl State {
     /// Saved state if valid, otherwise the configured defaults.
     pub fn load(dir: &Path, cfg: &Config) -> Self {
-        let fallback = Self { mode: valid_mode(&cfg.default_mode), fixed_percent: cfg.fixed_percent.min(100) };
+        let default_profile = cfg.default_profile().map_or("quiet", AutoProfile::name).to_owned();
+        let fallback = Self {
+            mode: valid_mode(&cfg.default_mode),
+            fixed_percent: cfg.fixed_percent.min(100),
+            auto_profile: default_profile.clone(),
+        };
         match fs::read_to_string(dir.join(STATE_FILE)) {
             Ok(text) => match toml::from_str::<State>(&text) {
-                Ok(s) => Self { mode: valid_mode(&s.mode), fixed_percent: s.fixed_percent.min(100) },
+                Ok(s) => Self {
+                    mode: valid_mode(&s.mode),
+                    fixed_percent: s.fixed_percent.min(100),
+                    auto_profile: if AutoProfile::parse(&s.auto_profile).is_some() { s.auto_profile } else { default_profile },
+                },
                 Err(e) => {
                     eprintln!("pavfand: ignoring unreadable state file: {e}");
                     fallback
@@ -205,20 +217,31 @@ mod tests {
         let c = Config::parse("").unwrap();
         assert_eq!(c.default_mode, "auto");
         assert_eq!(c.interval_ms, 1000);
-        assert!((c.thresholds.hard_c - 88.0).abs() < 0.01);
-        let p = c.params(Duration::from_millis(500)).unwrap();
+        assert_eq!(c.thresholds.hard_c, None);
+        assert_eq!(c.default_profile().unwrap(), AutoProfile::Quiet);
+        let p = c.params(Duration::from_millis(500), AutoProfile::Quiet).unwrap();
         assert_eq!((p.engage_ticks, p.release_ticks, p.min_engaged_ticks), (10, 20, 60));
+        assert!((p.hard_c - 88.0).abs() < 0.01);
     }
 
     #[test]
     fn partial_thresholds_keep_other_defaults_and_are_validated() {
         let c = Config::parse("[thresholds]\nengage_c = 70\n").unwrap();
-        assert!((c.thresholds.engage_c - 70.0).abs() < 0.01);
-        assert!((c.thresholds.disengage_c - 62.0).abs() < 0.01);
+        let p = c.params(Duration::from_secs(1), AutoProfile::Quiet).unwrap();
+        assert!((p.engage_c - 70.0).abs() < 0.01);
+        assert!((p.disengage_c - 62.0).abs() < 0.01); // untouched preset
+        // the same override applies on top of the other profile's presets
+        let p = c.params(Duration::from_secs(1), AutoProfile::Early).unwrap();
+        assert!((p.engage_c - 70.0).abs() < 0.01);
+        assert!((p.disengage_c - 52.0).abs() < 0.01);
+        assert_eq!(p.auto_profile, AutoProfile::Early);
         let bad = Config::parse("[thresholds]\nhard_c = 99\n").unwrap();
-        assert!(bad.params(Duration::from_secs(1)).is_err());
+        assert!(bad.params(Duration::from_secs(1), AutoProfile::Quiet).is_err());
         let bad = Config::parse("[thresholds]\nengage_delay_s = -1\n").unwrap();
-        assert!(bad.params(Duration::from_secs(1)).is_err());
+        assert!(bad.params(Duration::from_secs(1), AutoProfile::Quiet).is_err());
+        let early = Config::parse("auto_profile = \"early\"\n").unwrap();
+        assert_eq!(early.default_profile().unwrap(), AutoProfile::Early);
+        assert!(Config::parse("auto_profile = \"loud\"\n").unwrap().default_profile().is_err());
     }
 
     #[test]
@@ -232,11 +255,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pavfand-test-{}", std::process::id()));
         let cfg = Config::parse("default_mode = \"fixed\"\nfixed_percent = 70\n").unwrap();
         let s = State::load(&dir, &cfg);
-        assert_eq!(s, State { mode: "fixed".into(), fixed_percent: 70 });
-        State { mode: "manual".into(), fixed_percent: 30 }.save(&dir);
-        assert_eq!(State::load(&dir, &cfg), State { mode: "manual".into(), fixed_percent: 30 });
+        assert_eq!(s, State { mode: "fixed".into(), fixed_percent: 70, auto_profile: "quiet".into() });
+        State { mode: "manual".into(), fixed_percent: 30, auto_profile: "early".into() }.save(&dir);
+        assert_eq!(State::load(&dir, &cfg), State { mode: "manual".into(), fixed_percent: 30, auto_profile: "early".into() });
+        // a 0.1.x state file has no auto_profile; a bogus one falls back to the config default
         fs::write(dir.join(STATE_FILE), "mode = \"bogus\"\nfixed_percent = 200\n").unwrap();
-        assert_eq!(State::load(&dir, &cfg), State { mode: "auto".into(), fixed_percent: 100 });
+        assert_eq!(State::load(&dir, &cfg), State { mode: "auto".into(), fixed_percent: 100, auto_profile: "quiet".into() });
+        fs::write(dir.join(STATE_FILE), "mode = \"auto\"\nfixed_percent = 50\nauto_profile = \"loud\"\n").unwrap();
+        assert_eq!(State::load(&dir, &cfg).auto_profile, "quiet");
         let _ = fs::remove_dir_all(&dir);
     }
 

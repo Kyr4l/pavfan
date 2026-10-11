@@ -8,7 +8,8 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use pavfan_core::controller::Limits;
-use pavfan_ipc::{MODES, Status};
+use pavfan_core::governor::AutoProfile;
+use pavfan_ipc::{AUTO_PROFILES, MODES, Status};
 use zbus::fdo;
 use zbus::object_server::SignalEmitter;
 
@@ -19,6 +20,7 @@ pub enum Request {
     Mode(String),
     FixedPercent(u8),
     Curve(Vec<(f64, u8)>),
+    Profile(AutoProfile),
 }
 
 /// State shared between the control loop and the D-Bus methods.
@@ -26,15 +28,23 @@ pub struct Shared {
     pub status: Status,
     pub limits: Limits,
     pub mode_name: String,
+    pub auto_profile: AutoProfile,
     pub fixed_percent: u8,
     pub manual_points: Vec<(f64, u8)>,
     pub pending: Vec<Request>,
 }
 
 impl Shared {
-    pub fn new(limits: Limits, mode_name: String, fixed_percent: u8, manual_points: Vec<(f64, u8)>) -> Self {
+    pub fn new(
+        limits: Limits,
+        mode_name: String,
+        auto_profile: AutoProfile,
+        fixed_percent: u8,
+        manual_points: Vec<(f64, u8)>,
+    ) -> Self {
         let status = Status {
             mode: mode_name.clone(),
+            auto_profile: auto_profile.name().into(),
             fixed_percent,
             has_manual_curve: !manual_points.is_empty(),
             min_level: limits.min,
@@ -46,7 +56,7 @@ impl Shared {
             version: env!("CARGO_PKG_VERSION").into(),
             ..Status::default()
         };
-        Self { status, limits, mode_name, fixed_percent, manual_points, pending: Vec::new() }
+        Self { status, limits, mode_name, auto_profile, fixed_percent, manual_points, pending: Vec::new() }
     }
 }
 
@@ -83,6 +93,13 @@ impl Daemon1 {
             return Err(fdo::Error::InvalidArgs("percent must be 0..=100".into()));
         }
         lock(&self.shared).pending.push(Request::FixedPercent(percent));
+        Ok(())
+    }
+
+    fn set_auto_profile(&self, profile: &str) -> fdo::Result<()> {
+        let p = AutoProfile::parse(profile)
+            .ok_or_else(|| fdo::Error::InvalidArgs(format!("unknown profile '{profile}'; expected one of {AUTO_PROFILES:?}")))?;
+        lock(&self.shared).pending.push(Request::Profile(p));
         Ok(())
     }
 

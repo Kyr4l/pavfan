@@ -67,13 +67,14 @@ pavfan driving the fans, orange hard thermal override, red daemon unreachable.
 ```sh
 pavfan status                 # daemon status, EC state (root), temperatures
 pavfan set auto               # the default
+pavfan set auto early         # AUTO with the "early" profile (see Control modes)
 pavfan set fixed 60           # both fans at 60 % of the EC range
 pavfan set off                # hand the fans to the BIOS (daemon keeps running)
 pavfan set manual             # your curve (see below)
 journalctl -u pavfand -f      # what the daemon is doing
 ```
 
-The chosen mode is remembered across restarts and reboots (`/var/lib/pavfan/`).
+The chosen mode and AUTO profile are remembered across restarts and reboots (`/var/lib/pavfan/`).
 
 Configuration: `/etc/pavfan/config.toml` (defaults, thresholds; restart the daemon after edits)
 and `/etc/pavfan/curve.toml` (the MANUAL curve; validate with `pavfan curve --file …`).
@@ -100,7 +101,7 @@ GPU-heat fix that matters most on Linux cannot be reproduced there.
 | Mode | Behaviour |
 |---|---|
 | **OFF** | The BIOS controls the fans (stock behaviour). |
-| **AUTO** (default) | Built-in curve over `max(CPU, GPU + 8 °C)`: reacts to GPU heat, which the BIOS ignores on Linux (measured). Takes over once the effective temperature has stayed ≥ 68 °C for 5 s, holds for at least 30 s, and hands back to the BIOS after 10 s below 62 °C, so short load spikes do not cause fan bursts. |
+| **AUTO** (default) | Built-in curve over `max(CPU, GPU + 8 °C)`: reacts to GPU heat, which the BIOS ignores on Linux (measured). Two profiles, pick one in the tray's *Auto profile* submenu or with `pavfan set auto quiet\|early`: **quiet** (default) stays with the BIOS until the effective temperature has been ≥ 68 °C for 5 s, holds at least 30 s, hands back after 10 s below 62 °C: silent most of the time, each take-over is an audible step; **early** takes over from 58 °C at the lowest level with small steps: no steps, but a low hum more often (even the lowest override level keeps the GPU fan audible). |
 | **FIXED** | Both fans held at a fixed percentage of the EC range. |
 | **MANUAL** | Your own temperature → speed curve, always engaged. |
 

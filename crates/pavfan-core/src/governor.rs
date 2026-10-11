@@ -2,7 +2,7 @@
 //! Decides, tick by tick, what the fans should do. Pure logic, no I/O.
 
 use crate::controller::Limits;
-use crate::curve::{Curve, default_auto};
+use crate::curve::{Curve, auto_curve};
 use crate::error::{Error, Result};
 
 #[derive(Clone, Debug)]
@@ -42,8 +42,73 @@ pub enum Decision {
     Level(u8),
 }
 
+/// Built-in AUTO behaviours. Same mechanism, different trade-off between silence and steps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AutoProfile {
+    /// BIOS control until 68 C effective, then take over (debounced). Silent most of the
+    /// time; each take-over is an audible step.
+    #[default]
+    Quiet,
+    /// Take over from 58 C at the EC minimum with small steps. No jump from silence, but
+    /// the GPU fan hums whenever engaged (even the lowest override level is audible).
+    Early,
+}
+
+impl AutoProfile {
+    pub const ALL: [AutoProfile; 2] = [AutoProfile::Quiet, AutoProfile::Early];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            AutoProfile::Quiet => "quiet",
+            AutoProfile::Early => "early",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.name() == name)
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            AutoProfile::Quiet => "BIOS control until 68 C, then take over (silent most of the time, audible steps)",
+            AutoProfile::Early => "take over from 58 C with small steps (no steps, low hum more often)",
+        }
+    }
+
+    /// Preset parameters, with tick counts expressed for a 1 s control tick
+    /// (see `Params::rescale_ticks`).
+    pub fn params(self) -> Params {
+        let quiet = Params {
+            auto_profile: AutoProfile::Quiet,
+            gpu_bias_c: 8.0,
+            engage_c: 68.0,
+            disengage_c: 62.0,
+            hard_c: 88.0,
+            hard_hysteresis_c: 5.0,
+            down_every_ticks: 3,
+            engage_ticks: 5,
+            release_ticks: 10,
+            min_engaged_ticks: 30,
+        };
+        match self {
+            AutoProfile::Quiet => quiet,
+            AutoProfile::Early => Params {
+                auto_profile: AutoProfile::Early,
+                engage_c: 58.0,
+                disengage_c: 52.0,
+                engage_ticks: 2,
+                release_ticks: 15,
+                min_engaged_ticks: 45,
+                ..quiet
+            },
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Params {
+    /// Which built-in AUTO behaviour (curve and presets) these parameters are based on.
+    pub auto_profile: AutoProfile,
     /// Added to the GPU temperature before it is compared with the CPU's. Positive by
     /// default: the BIOS ignores GPU heat (measured, see docs/thermal-measurements.md),
     /// and the GPU fan is the fan the override actually drives, so GPU heat is what we
@@ -79,16 +144,18 @@ pub const HARD_C_CEILING: f32 = 90.0;
 
 impl Default for Params {
     fn default() -> Self {
+        AutoProfile::Quiet.params()
+    }
+}
+
+impl Params {
+    /// Presets count ticks for a 1 s loop; rescale the three tick counts for another interval.
+    pub fn rescale_ticks(self, interval: std::time::Duration) -> Self {
         Self {
-            gpu_bias_c: 8.0,
-            engage_c: 68.0,
-            disengage_c: 62.0,
-            hard_c: 88.0,
-            hard_hysteresis_c: 5.0,
-            down_every_ticks: 3,
-            engage_ticks: 5,
-            release_ticks: 10,
-            min_engaged_ticks: 30,
+            engage_ticks: secs_to_ticks(self.engage_ticks as f32, interval),
+            release_ticks: secs_to_ticks(self.release_ticks as f32, interval),
+            min_engaged_ticks: secs_to_ticks(self.min_engaged_ticks as f32, interval),
+            ..self
         }
     }
 }
@@ -134,7 +201,7 @@ pub struct Governor {
 impl Governor {
     pub fn new(mode: Mode, params: Params, limits: Limits) -> Result<Self> {
         params.validate()?;
-        let auto_curve = default_auto(limits)?;
+        let auto_curve = auto_curve(params.auto_profile, limits)?;
         let mode = match mode {
             Mode::Fixed(l) => Mode::Fixed(limits.clamp(l)),
             other => other,
@@ -161,6 +228,10 @@ impl Governor {
     /// True while the hard thermal override is forcing maximum fans.
     pub fn hard_active(&self) -> bool {
         self.hard_active
+    }
+
+    pub fn profile(&self) -> AutoProfile {
+        self.params.auto_profile
     }
 
     /// Temperature the decisions are based on: the hotter of the CPU and the
@@ -333,6 +404,32 @@ mod tests {
     fn hard_override_is_immediate_even_with_debounce() {
         let mut g = Governor::new(Mode::Auto, Params::default(), L).unwrap();
         assert_eq!(g.decide(cpu(90.0)), Decision::Level(42));
+    }
+
+    #[test]
+    fn profiles_parse_and_build_valid_governors() {
+        for p in AutoProfile::ALL {
+            assert_eq!(AutoProfile::parse(p.name()), Some(p));
+            assert!(Governor::new(Mode::Auto, p.params(), L).is_ok());
+        }
+        assert_eq!(AutoProfile::parse("loud"), None);
+        assert_eq!(Params::default().auto_profile, AutoProfile::Quiet);
+    }
+
+    #[test]
+    fn early_profile_takes_over_lower_and_starts_at_the_minimum_level() {
+        let p = Params { engage_ticks: 1, ..AutoProfile::Early.params() };
+        let mut g = Governor::new(Mode::Auto, p, L).unwrap();
+        assert_eq!(g.decide(cpu(57.0)), Decision::Bios);
+        assert_eq!(g.decide(cpu(58.0)), Decision::Level(22));
+        assert_eq!(g.decide(cpu(70.0)), Decision::Level(30));
+    }
+
+    #[test]
+    fn rescale_ticks_follows_the_interval() {
+        use std::time::Duration;
+        let p = AutoProfile::Quiet.params().rescale_ticks(Duration::from_millis(500));
+        assert_eq!((p.engage_ticks, p.release_ticks, p.min_engaged_ticks), (10, 20, 60));
     }
 
     #[test]

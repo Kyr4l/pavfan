@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0 — 2026-10-11
+
+* AUTO profiles: **quiet** (the previous behaviour: BIOS until 68 °C, debounced take-over) and
+  **early** (take over from 58 °C at the lowest level with small steps, no audible jump).
+  Selectable from the tray's *Auto profile* submenu, `pavfan set auto <quiet|early>`, or
+  `auto_profile` in the config; remembered across reboots.
+* `[thresholds]` keys in the config are now overrides on top of the selected profile.
+* D-Bus: new `SetAutoProfile`, new `auto_profile` field in `GetStatus` (struct signature changed,
+  hence the minor version bump). `pavfan run --auto-profile`, `pavfan curve --profile`.
+
 ## 0.1.1 — 2026-10-11
 
 * AUTO: take-over is debounced (5 s above the threshold), engaged state is held at least 30 s,

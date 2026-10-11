@@ -38,6 +38,7 @@ struct Cli {
 enum Cmd {
     SetMode(&'static str),
     SetFixed(u8),
+    SetProfile(&'static str),
     Quit,
 }
 
@@ -71,6 +72,7 @@ impl PavfanTray {
             Some(s) => {
                 let mode = match s.mode.as_str() {
                     "fixed" => format!("FIXED {}%", s.fixed_percent),
+                    "auto" => format!("AUTO ({})", s.auto_profile),
                     m => m.to_uppercase(),
                 };
                 let fans = if s.engaged {
@@ -128,6 +130,7 @@ impl ksni::Tray for PavfanTray {
         let mode = self.status.as_ref().map(|s| s.mode.clone()).unwrap_or_default();
         let has_curve = self.status.as_ref().is_some_and(|s| s.has_manual_curve);
         let fixed_pct = self.status.as_ref().map_or(50, |s| s.fixed_percent);
+        let profile_index = usize::from(self.status.as_ref().is_some_and(|s| s.auto_profile == "early"));
 
         let mode_index = match mode.as_str() {
             "off" => 0,
@@ -176,6 +179,25 @@ impl ksni::Tray for PavfanTray {
                             .iter()
                             .map(|p| RadioItem { label: format!("{p}%"), ..Default::default() })
                             .collect(),
+                    }
+                    .into(),
+                ],
+                ..Default::default()
+            }
+            .into(),
+            SubMenu {
+                label: "Auto profile".into(),
+                enabled: connected,
+                submenu: vec![
+                    RadioGroup {
+                        selected: profile_index,
+                        select: Box::new(|this: &mut Self, idx| {
+                            this.send(Cmd::SetProfile(if idx == 1 { "early" } else { "quiet" }));
+                        }),
+                        options: vec![
+                            RadioItem { label: "Quiet: BIOS until 68 °C, then take over".into(), ..Default::default() },
+                            RadioItem { label: "Early: take over from 58 °C with small steps".into(), ..Default::default() },
+                        ],
                     }
                     .into(),
                 ],
@@ -236,6 +258,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Err(e) => Err(e),
                         };
                         if let Err(e) = r {
+                            handle.update(|t| t.error = Some(e.to_string())).await;
+                        }
+                        tokio::time::sleep(Duration::from_millis(1300)).await;
+                        refresh(&proxy, &handle).await;
+                    }
+                    Some(Cmd::SetProfile(p)) => {
+                        if let Err(e) = proxy.set_auto_profile(p).await {
                             handle.update(|t| t.error = Some(e.to_string())).await;
                         }
                         tokio::time::sleep(Duration::from_millis(1300)).await;

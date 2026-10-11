@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 use crate::controller::Limits;
 use crate::error::{Error, Result};
+use crate::governor::AutoProfile;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Point {
@@ -88,18 +89,26 @@ impl Curve {
     }
 }
 
-/// The built-in AUTO curve (levels are x100 RPM) over the *effective* temperature
+/// The built-in AUTO curves (levels are x100 RPM) over the *effective* temperature
 /// (`max(CPU, GPU + bias)`, see `governor`).
 ///
-/// Shaped by the sweeps in docs/thermal-measurements.md: the override never cooled
-/// the CPU worse than the BIOS at any level, its gain is largest under GPU heat, and
-/// under combined load the machine needs maximum fans from about 85 C.
-pub fn default_auto(limits: Limits) -> Result<Curve> {
-    let pts = [(68.0, 30), (76.0, 34), (82.0, 39), (85.0, 42)]
-        .into_iter()
-        .map(|(temp_c, l)| Point { temp_c, level: limits.clamp(l) })
-        .collect();
+/// `Quiet` is shaped by the sweeps in docs/thermal-measurements.md: the override never
+/// cooled the CPU worse than the BIOS at any level, its gain is largest under GPU heat,
+/// and under combined load the machine needs maximum fans from about 85 C.
+/// `Early` starts 10 C lower, at the EC minimum, with smaller steps: the take-over is a
+/// small change instead of a jump from silence, at the price of a hum more of the time.
+pub fn auto_curve(profile: AutoProfile, limits: Limits) -> Result<Curve> {
+    let pts: &[(f32, u8)] = match profile {
+        AutoProfile::Quiet => &[(68.0, 30), (76.0, 34), (82.0, 39), (85.0, 42)],
+        AutoProfile::Early => &[(58.0, 22), (64.0, 26), (70.0, 30), (76.0, 34), (82.0, 39), (85.0, 42)],
+    };
+    let pts = pts.iter().map(|&(temp_c, l)| Point { temp_c, level: limits.clamp(l) }).collect();
     Curve::new(pts, limits)
+}
+
+/// The default (`Quiet`) AUTO curve.
+pub fn default_auto(limits: Limits) -> Result<Curve> {
+    auto_curve(AutoProfile::Quiet, limits)
 }
 
 #[derive(Deserialize)]
@@ -182,6 +191,15 @@ mod tests {
     #[test]
     fn default_auto_is_valid() {
         assert!(default_auto(L).is_ok());
+    }
+
+    #[test]
+    fn every_profile_curve_is_valid_and_starts_at_its_engage_temperature() {
+        for p in AutoProfile::ALL {
+            let c = auto_curve(p, L).unwrap();
+            assert!((c.start_temp() - p.params().engage_c).abs() < 0.01, "{p:?}");
+            assert_eq!(c.level_at(100.0), 42);
+        }
     }
 
     #[test]
