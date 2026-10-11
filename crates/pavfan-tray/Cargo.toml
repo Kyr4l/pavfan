@@ -1,0 +1,19 @@
+[package]
+name = "pavfan-tray"
+description = "System tray icon (StatusNotifierItem) for the pavfan daemon; works on KDE Plasma and other desktops"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+pavfan-ipc = { path = "../pavfan-ipc" }
+clap = { version = "4", features = ["derive"] }
+ksni = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+zbus = { version = "5", default-features = false, features = ["tokio", "blocking-api"] }
+
+[lints]
+workspace = true
